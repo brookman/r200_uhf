@@ -26,6 +26,7 @@ impl std::error::Error for FrameError {}
 pub enum Command {
     GetWorkingChannel,
     GetWorkingArea,
+    SetWorkingArea(u8),
     AcquireTransmitPower,
     SetTransmissionPower(f64),
     HardwareVersion,
@@ -34,6 +35,8 @@ pub enum Command {
     SinglePollingInstruction,
     MultiplePollingInstruction(u16),
     StopMultiplePollingInstruction,
+    SetSelect(Vec<u8>),
+    WriteLabel(Vec<u8>),
 }
 
 impl Display for Command {
@@ -55,6 +58,9 @@ impl Display for Command {
             Command::StopMultiplePollingInstruction => {
                 write!(f, "Stop Multiple Polling Instruction")
             }
+            Command::SetWorkingArea(code) => write!(f, "Set Working Area to {}", code),
+            Command::SetSelect(params) => write!(f, "Set Select ({} bytes)", params.len()),
+            Command::WriteLabel(params) => write!(f, "Write Label ({} bytes)", params.len()),
         }
     }
 }
@@ -106,6 +112,9 @@ impl SerializableCommand for Command {
                 (vec![0x27], v)
             }
             Command::StopMultiplePollingInstruction => (vec![0x28], vec![]),
+            Command::SetWorkingArea(code) => (vec![0x07], vec![*code]),
+            Command::SetSelect(params) => (vec![0x0C], params.to_vec()),
+            Command::WriteLabel(params) => (vec![0x49], params.to_vec()),
         }
     }
 
@@ -128,6 +137,7 @@ impl SerializableCommand for Command {
             (0x08, _) => Ok(Command::GetWorkingArea),
             (0xB7, _) => Ok(Command::AcquireTransmitPower),
             (0x28, _) => Ok(Command::StopMultiplePollingInstruction),
+            (0x07, code) => Ok(Command::SetWorkingArea(code)),
             _ => Err(FrameError::InvalidCommand(format!(
                 "Invalid command code: {}",
                 tuple.0[0]

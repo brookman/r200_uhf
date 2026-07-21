@@ -72,6 +72,14 @@ pub trait SyncIO {
         pool_times: u16,
     ) -> Result<(), ConnectorError>; // Stop Multi: AA 00 28 00 00 28 DD
     fn stop_multiple_polling_instructions(&mut self) -> Result<(), ConnectorError>;
+    /// Set the regulatory working area on the device.
+    fn set_working_area(&mut self, area: WorkingArea) -> Result<(), ConnectorError>;
+    /// Select a tag by EPC for subsequent operations.
+    fn select_tag(&mut self, epc: &[u8]) -> Result<(), ConnectorError>;
+    /// Clear the current tag selection.
+    fn clear_select(&mut self) -> Result<(), ConnectorError>;
+    /// Write a new EPC to a tag.
+    fn write_epc(&mut self, epc: &[u8]) -> Result<(), ConnectorError>;
 }
 
 impl<S> SyncIO for Connector<S>
@@ -316,6 +324,81 @@ where
         Err(ConnectorError::ErrorStopMultiPolling(
             "Generic comunication error".into(),
         ))
+    }
+
+    fn set_working_area(&mut self, area: WorkingArea) -> Result<(), ConnectorError> {
+        let code: u8 = match area {
+            WorkingArea::China900Mhz => 0,
+            WorkingArea::China800Mhz => 1,
+            WorkingArea::US => 2,
+            WorkingArea::EU => 3,
+            WorkingArea::Korea => 4,
+        };
+        self.send_packet(Command::SetWorkingArea(code))?;
+        let p = self.single_read_from_serial()?;
+        if let Some(p) = p {
+            let data = p.get_data();
+            if data.first() == Some(&0xFF) {
+                return Err(ConnectorError::FailedSetting(format!(
+                    "Set working area to {:?} failed",
+                    area
+                )));
+            }
+            return Ok(());
+        }
+        Err(ConnectorError::NoPacketReceived)
+    }
+
+    fn select_tag(&mut self, epc: &[u8]) -> Result<(), ConnectorError> {
+        let mut params = Vec::new();
+        params.push(0x01);
+        params.extend_from_slice(&[0x00, 0x00, 0x00, 0x20]);
+        params.push(0x60);
+        params.push(0x00);
+        params.extend_from_slice(epc);
+        self.send_packet(Command::SetSelect(params))?;
+        let p = self.single_read_from_serial()?;
+        if let Some(p) = p {
+            let data = p.get_data();
+            if data.first() == Some(&0xFF) {
+                return Err(ConnectorError::FailedSetting("Select tag failed".into()));
+            }
+            return Ok(());
+        }
+        Err(ConnectorError::NoPacketReceived)
+    }
+
+    fn clear_select(&mut self) -> Result<(), ConnectorError> {
+        let params = vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        self.send_packet(Command::SetSelect(params))?;
+        let p = self.single_read_from_serial()?;
+        if let Some(p) = p {
+            let data = p.get_data();
+            if data.first() == Some(&0xFF) {
+                return Err(ConnectorError::FailedSetting("Clear select failed".into()));
+            }
+            return Ok(());
+        }
+        Err(ConnectorError::NoPacketReceived)
+    }
+
+    fn write_epc(&mut self, epc: &[u8]) -> Result<(), ConnectorError> {
+        let mut params = Vec::new();
+        params.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+        params.push(0x01);
+        params.extend_from_slice(&[0x00, 0x02]);
+        params.extend_from_slice(&[0x00, 0x06]);
+        params.extend_from_slice(epc);
+        self.send_packet(Command::WriteLabel(params))?;
+        let p = self.single_read_from_serial()?;
+        if let Some(p) = p {
+            let data = p.get_data();
+            if data.first() == Some(&0xFF) {
+                return Err(ConnectorError::FailedSetting("Write EPC failed".into()));
+            }
+            return Ok(());
+        }
+        Err(ConnectorError::NoPacketReceived)
     }
 }
 
