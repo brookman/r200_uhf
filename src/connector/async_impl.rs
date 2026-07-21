@@ -5,7 +5,7 @@ use crate::frame::{Command, Frame, R200_FRAME_END, R200_FRAME_HEADER};
 use crate::packet::Packet;
 use crate::rfid::Rfid;
 use async_trait::async_trait;
-use log::{debug, info};
+use log::debug;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -27,6 +27,10 @@ pub trait AsyncIO {
     async fn single_polling_instruction(&mut self) -> Result<Vec<Rfid>, ConnectorError>;
     async fn multi_polling_instruction(&mut self) -> Result<Vec<Rfid>, ConnectorError>;
     async fn stop_multiple_polling_instructions(&mut self) -> Result<(), ConnectorError>;
+    async fn set_working_area(&mut self, area: WorkingArea) -> Result<(), ConnectorError>;
+    async fn select_tag(&mut self, epc: &[u8]) -> Result<(), ConnectorError>;
+    async fn clear_select(&mut self) -> Result<(), ConnectorError>;
+    async fn write_epc(&mut self, epc: &[u8]) -> Result<(), ConnectorError>;
 }
 
 #[async_trait]
@@ -205,6 +209,77 @@ where
         Err(ConnectorError::ErrorStopMultiPolling(
             "Failed to stop multi polling".into(),
         ))
+    }
+
+    async fn set_working_area(&mut self, area: WorkingArea) -> Result<(), ConnectorError> {
+        let code: u8 = match area {
+            WorkingArea::China900Mhz => 0,
+            WorkingArea::China800Mhz => 1,
+            WorkingArea::US => 2,
+            WorkingArea::EU => 3,
+            WorkingArea::Korea => 4,
+        };
+        self.send_packet(Command::SetWorkingArea(code)).await?;
+        if let Some(p) = self.single_read_from_serial().await? {
+            let data = p.get_data();
+            if data.first() == Some(&0xFF) {
+                return Err(ConnectorError::FailedSetting(format!(
+                    "Set working area to {:?} failed",
+                    area
+                )));
+            }
+            return Ok(());
+        }
+        Err(ConnectorError::NoPacketReceived)
+    }
+
+    async fn select_tag(&mut self, epc: &[u8]) -> Result<(), ConnectorError> {
+        let mut params = Vec::new();
+        params.push(0x01);
+        params.extend_from_slice(&[0x00, 0x00, 0x00, 0x20]);
+        params.push(0x60);
+        params.push(0x00);
+        params.extend_from_slice(epc);
+        self.send_packet(Command::SetSelect(params)).await?;
+        if let Some(p) = self.single_read_from_serial().await? {
+            let data = p.get_data();
+            if data.first() == Some(&0xFF) {
+                return Err(ConnectorError::FailedSetting("Select tag failed".into()));
+            }
+            return Ok(());
+        }
+        Err(ConnectorError::NoPacketReceived)
+    }
+
+    async fn clear_select(&mut self) -> Result<(), ConnectorError> {
+        let params = vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        self.send_packet(Command::SetSelect(params)).await?;
+        if let Some(p) = self.single_read_from_serial().await? {
+            let data = p.get_data();
+            if data.first() == Some(&0xFF) {
+                return Err(ConnectorError::FailedSetting("Clear select failed".into()));
+            }
+            return Ok(());
+        }
+        Err(ConnectorError::NoPacketReceived)
+    }
+
+    async fn write_epc(&mut self, epc: &[u8]) -> Result<(), ConnectorError> {
+        let mut params = Vec::new();
+        params.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+        params.push(0x01);
+        params.extend_from_slice(&[0x00, 0x02]);
+        params.extend_from_slice(&[0x00, 0x06]);
+        params.extend_from_slice(epc);
+        self.send_packet(Command::WriteLabel(params)).await?;
+        if let Some(p) = self.single_read_from_serial().await? {
+            let data = p.get_data();
+            if data.first() == Some(&0xFF) {
+                return Err(ConnectorError::FailedSetting("Write EPC failed".into()));
+            }
+            return Ok(());
+        }
+        Err(ConnectorError::NoPacketReceived)
     }
 }
 
