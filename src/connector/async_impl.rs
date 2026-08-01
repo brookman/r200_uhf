@@ -1,7 +1,8 @@
 use crate::connector::{
-    Connector, ConnectorError, WorkingArea, calculate_transmit_power, clear_non_ascii, hexdump_line,
+    Connector, ConnectorError, WorkingArea, calculate_transmit_power, clear_non_ascii, hex_lower,
+    hexdump_line, parse_hex_str,
 };
-use crate::frame::{Command, Frame, R200_FRAME_END, R200_FRAME_HEADER};
+use crate::frame::{Command, ErrorCode, Frame, R200_FRAME_END, R200_FRAME_HEADER};
 use crate::packet::Packet;
 use crate::rfid::Rfid;
 use async_trait::async_trait;
@@ -30,7 +31,14 @@ pub trait AsyncIO {
     async fn set_working_area(&mut self, area: WorkingArea) -> Result<(), ConnectorError>;
     async fn select_tag(&mut self, epc: &[u8]) -> Result<(), ConnectorError>;
     async fn clear_select(&mut self) -> Result<(), ConnectorError>;
+    async fn read_epc(&mut self, mem_bank: u8, start_addr: u16, length: u16) -> Result<Vec<u8>, ConnectorError>;
     async fn write_epc(&mut self, epc: &[u8]) -> Result<(), ConnectorError>;
+    async fn write_epc_reliable(
+        &mut self,
+        current_epc: &[u8],
+        new_epc: &[u8],
+        max_retries: usize,
+    ) -> Result<(), ConnectorError>;
 }
 
 #[async_trait]
@@ -221,12 +229,9 @@ where
         };
         self.send_packet(Command::SetWorkingArea(code)).await?;
         if let Some(p) = self.single_read_from_serial().await? {
-            let data = p.get_data();
-            if data.first() == Some(&0xFF) {
-                return Err(ConnectorError::FailedSetting(format!(
-                    "Set working area to {:?} failed",
-                    area
-                )));
+            if p.is_error() {
+                let error_code = ErrorCode::from_byte(p.error_code_byte().unwrap_or(0xFF));
+                return Err(ConnectorError::CommandError(error_code));
             }
             return Ok(());
         }
@@ -242,9 +247,9 @@ where
         params.extend_from_slice(epc);
         self.send_packet(Command::SetSelect(params)).await?;
         if let Some(p) = self.single_read_from_serial().await? {
-            let data = p.get_data();
-            if data.first() == Some(&0xFF) {
-                return Err(ConnectorError::FailedSetting("Select tag failed".into()));
+            if p.is_error() {
+                let error_code = ErrorCode::from_byte(p.error_code_byte().unwrap_or(0xFF));
+                return Err(ConnectorError::CommandError(error_code));
             }
             return Ok(());
         }
@@ -255,11 +260,30 @@ where
         let params = vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
         self.send_packet(Command::SetSelect(params)).await?;
         if let Some(p) = self.single_read_from_serial().await? {
-            let data = p.get_data();
-            if data.first() == Some(&0xFF) {
-                return Err(ConnectorError::FailedSetting("Clear select failed".into()));
+            if p.is_error() {
+                let error_code = ErrorCode::from_byte(p.error_code_byte().unwrap_or(0xFF));
+                return Err(ConnectorError::CommandError(error_code));
             }
             return Ok(());
+        }
+        Err(ConnectorError::NoPacketReceived)
+    }
+
+    async fn read_epc(&mut self, mem_bank: u8, start_addr: u16, length: u16) -> Result<Vec<u8>, ConnectorError> {
+        let mut params = Vec::new();
+        params.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+        params.push(mem_bank);
+        params.push((start_addr >> 8) as u8);
+        params.push((start_addr & 0xFF) as u8);
+        params.push((length >> 8) as u8);
+        params.push((length & 0xFF) as u8);
+        self.send_packet(Command::ReadLabel(params)).await?;
+        if let Some(p) = self.single_read_from_serial().await? {
+            if p.is_error() {
+                let error_code = ErrorCode::from_byte(p.error_code_byte().unwrap_or(0xFF));
+                return Err(ConnectorError::CommandError(error_code));
+            }
+            return Ok(p.get_data());
         }
         Err(ConnectorError::NoPacketReceived)
     }
@@ -273,13 +297,44 @@ where
         params.extend_from_slice(epc);
         self.send_packet(Command::WriteLabel(params)).await?;
         if let Some(p) = self.single_read_from_serial().await? {
-            let data = p.get_data();
-            if data.first() == Some(&0xFF) {
-                return Err(ConnectorError::FailedSetting("Write EPC failed".into()));
+            if p.is_error() {
+                let error_code = ErrorCode::from_byte(p.error_code_byte().unwrap_or(0xFF));
+                return Err(ConnectorError::CommandError(error_code));
             }
             return Ok(());
         }
         Err(ConnectorError::NoPacketReceived)
+    }
+
+    async fn write_epc_reliable(
+        &mut self,
+        current_epc: &[u8],
+        new_epc: &[u8],
+        max_retries: usize,
+    ) -> Result<(), ConnectorError> {
+        let mut last_err = None;
+        let mut select_epc = current_epc.to_vec();
+
+        for attempt in 0..=max_retries {
+            self.select_tag(&select_epc).await?;
+            match self.write_epc(new_epc).await {
+                Ok(()) => return Ok(()),
+                Err(ConnectorError::CommandError(ErrorCode::WriteFail)) => {
+                    debug!("[write_epc] attempt {}/{} failed: WriteFail, polling to rediscover tag", attempt + 1, max_retries + 1);
+                    last_err = Some(ConnectorError::CommandError(ErrorCode::WriteFail));
+                    self.clear_select().await.ok();
+                    if let Ok(tags) = self.single_polling_instruction().await {
+                        if let Some(tag) = tags.first() {
+                            let discovered = parse_hex_str(&tag.epc);
+                            debug!("[write_epc] rediscovered tag EPC: {} (expected: {})", tag.epc, hex_lower(&select_epc));
+                            select_epc = discovered;
+                        }
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last_err.unwrap())
     }
 }
 

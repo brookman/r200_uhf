@@ -1,7 +1,8 @@
 use crate::connector::{
-    Connector, ConnectorError, WorkingArea, calculate_transmit_power, clear_non_ascii, hexdump_line,
+    Connector, ConnectorError, WorkingArea, calculate_transmit_power, clear_non_ascii, hex_lower,
+    hexdump_line, parse_hex_str,
 };
-use crate::frame::{Command, Frame, R200_FRAME_END, R200_FRAME_HEADER};
+use crate::frame::{Command, ErrorCode, Frame, R200_FRAME_END, R200_FRAME_HEADER};
 use crate::packet::Packet;
 use crate::rfid::Rfid;
 use log::{debug, error};
@@ -78,8 +79,17 @@ pub trait SyncIO {
     fn select_tag(&mut self, epc: &[u8]) -> Result<(), ConnectorError>;
     /// Clear the current tag selection.
     fn clear_select(&mut self) -> Result<(), ConnectorError>;
+    /// Read EPC and user data from a selected tag.
+    fn read_epc(&mut self, mem_bank: u8, start_addr: u16, length: u16) -> Result<Vec<u8>, ConnectorError>;
     /// Write a new EPC to a tag.
     fn write_epc(&mut self, epc: &[u8]) -> Result<(), ConnectorError>;
+    /// Write EPC with automatic select + retry.
+    fn write_epc_reliable(
+        &mut self,
+        current_epc: &[u8],
+        new_epc: &[u8],
+        max_retries: usize,
+    ) -> Result<(), ConnectorError>;
 }
 
 impl<S> SyncIO for Connector<S>
@@ -337,12 +347,9 @@ where
         self.send_packet(Command::SetWorkingArea(code))?;
         let p = self.single_read_from_serial()?;
         if let Some(p) = p {
-            let data = p.get_data();
-            if data.first() == Some(&0xFF) {
-                return Err(ConnectorError::FailedSetting(format!(
-                    "Set working area to {:?} failed",
-                    area
-                )));
+            if p.is_error() {
+                let error_code = ErrorCode::from_byte(p.error_code_byte().unwrap_or(0xFF));
+                return Err(ConnectorError::CommandError(error_code));
             }
             return Ok(());
         }
@@ -359,9 +366,9 @@ where
         self.send_packet(Command::SetSelect(params))?;
         let p = self.single_read_from_serial()?;
         if let Some(p) = p {
-            let data = p.get_data();
-            if data.first() == Some(&0xFF) {
-                return Err(ConnectorError::FailedSetting("Select tag failed".into()));
+            if p.is_error() {
+                let error_code = ErrorCode::from_byte(p.error_code_byte().unwrap_or(0xFF));
+                return Err(ConnectorError::CommandError(error_code));
             }
             return Ok(());
         }
@@ -373,11 +380,39 @@ where
         self.send_packet(Command::SetSelect(params))?;
         let p = self.single_read_from_serial()?;
         if let Some(p) = p {
-            let data = p.get_data();
-            if data.first() == Some(&0xFF) {
-                return Err(ConnectorError::FailedSetting("Clear select failed".into()));
+            if p.is_error() {
+                let error_code = ErrorCode::from_byte(p.error_code_byte().unwrap_or(0xFF));
+                return Err(ConnectorError::CommandError(error_code));
             }
             return Ok(());
+        }
+        Err(ConnectorError::NoPacketReceived)
+    }
+
+    /// Read data from a selected tag.
+    ///
+    /// Parameters:
+    /// - mem_bank: Memory bank to read (0x00=Reserved, 0x01=EPC, 0x02=TID, 0x03=User)
+    /// - start_addr: Starting word address (0-based)
+    /// - length: Number of words to read
+    ///
+    /// Returns the raw data bytes on success.
+    fn read_epc(&mut self, mem_bank: u8, start_addr: u16, length: u16) -> Result<Vec<u8>, ConnectorError> {
+        let mut params = Vec::new();
+        params.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+        params.push(mem_bank);
+        params.push((start_addr >> 8) as u8);
+        params.push((start_addr & 0xFF) as u8);
+        params.push((length >> 8) as u8);
+        params.push((length & 0xFF) as u8);
+        self.send_packet(Command::ReadLabel(params))?;
+        let p = self.single_read_from_serial()?;
+        if let Some(p) = p {
+            if p.is_error() {
+                let error_code = ErrorCode::from_byte(p.error_code_byte().unwrap_or(0xFF));
+                return Err(ConnectorError::CommandError(error_code));
+            }
+            return Ok(p.get_data());
         }
         Err(ConnectorError::NoPacketReceived)
     }
@@ -392,13 +427,51 @@ where
         self.send_packet(Command::WriteLabel(params))?;
         let p = self.single_read_from_serial()?;
         if let Some(p) = p {
-            let data = p.get_data();
-            if data.first() == Some(&0xFF) {
-                return Err(ConnectorError::FailedSetting("Write EPC failed".into()));
+            if p.is_error() {
+                let error_code = ErrorCode::from_byte(p.error_code_byte().unwrap_or(0xFF));
+                return Err(ConnectorError::CommandError(error_code));
             }
             return Ok(());
         }
         Err(ConnectorError::NoPacketReceived)
+    }
+
+    /// Write EPC to a tag with automatic retry.
+    ///
+    /// Selects the tag by its current EPC, then writes the new EPC.
+    /// On WriteFail, polls to rediscover the tag's actual EPC (writes can be
+    /// partially applied, changing the tag's EPC mid-attempt) and retries up to
+    /// `max_retries` times.
+    fn write_epc_reliable(
+        &mut self,
+        current_epc: &[u8],
+        new_epc: &[u8],
+        max_retries: usize,
+    ) -> Result<(), ConnectorError> {
+        let mut last_err = None;
+        let mut select_epc = current_epc.to_vec();
+
+        for attempt in 0..=max_retries {
+            self.select_tag(&select_epc)?;
+            match self.write_epc(new_epc) {
+                Ok(()) => return Ok(()),
+                Err(ConnectorError::CommandError(ErrorCode::WriteFail)) => {
+                    debug!("[write_epc] attempt {}/{} failed: WriteFail, polling to rediscover tag", attempt + 1, max_retries + 1);
+                    last_err = Some(ConnectorError::CommandError(ErrorCode::WriteFail));
+                    // Tag may have partially written EPC; poll to discover actual EPC
+                    self.clear_select().ok();
+                    if let Ok(tags) = self.single_polling_instruction() {
+                        if let Some(tag) = tags.first() {
+                            let discovered = parse_hex_str(&tag.epc);
+                            debug!("[write_epc] rediscovered tag EPC: {} (expected: {})", tag.epc, hex_lower(&select_epc));
+                            select_epc = discovered;
+                        }
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last_err.unwrap())
     }
 }
 

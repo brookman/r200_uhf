@@ -36,7 +36,93 @@ pub enum Command {
     MultiplePollingInstruction(u16),
     StopMultiplePollingInstruction,
     SetSelect(Vec<u8>),
+    ReadLabel(Vec<u8>),
     WriteLabel(Vec<u8>),
+}
+
+/// M100 protocol error codes
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorCode {
+    Success,
+    CommandError,
+    FhssFail,
+    InventoryFail,
+    AccessFail,
+    ReadFail,
+    ReadError(u8),
+    WriteFail,
+    WriteError(u8),
+    LockFail,
+    LockError(u8),
+    KillFail,
+    KillError(u8),
+    BlockPermalockFail,
+    BlockPermalockError(u8),
+    ChangeConfigFail,
+    ReadProtectFail,
+    ResetReadProtectFail,
+    ChangeEasFail,
+    EasAlarmFail,
+    QtFail,
+    Unknown(u8),
+}
+
+impl ErrorCode {
+    pub fn from_byte(b: u8) -> Self {
+        match b {
+            0x00 => ErrorCode::Success,
+            0x09 => ErrorCode::ReadFail,
+            0x10 => ErrorCode::WriteFail,
+            0x12 => ErrorCode::KillFail,
+            0x13 => ErrorCode::LockFail,
+            0x14 => ErrorCode::BlockPermalockFail,
+            0x15 => ErrorCode::InventoryFail,
+            0x16 => ErrorCode::AccessFail,
+            0x17 => ErrorCode::CommandError,
+            0x1A => ErrorCode::ChangeConfigFail,
+            0x1B => ErrorCode::ChangeEasFail,
+            0x1D => ErrorCode::EasAlarmFail,
+            0x20 => ErrorCode::FhssFail,
+            0x2A => ErrorCode::ReadProtectFail,
+            0x2B => ErrorCode::ResetReadProtectFail,
+            0x2E => ErrorCode::QtFail,
+            b if b & 0xF0 == 0xA0 => ErrorCode::ReadError(b & 0x0F),
+            b if b & 0xF0 == 0xB0 => ErrorCode::WriteError(b & 0x0F),
+            b if b & 0xF0 == 0xC0 => ErrorCode::LockError(b & 0x0F),
+            b if b & 0xF0 == 0xD0 => ErrorCode::KillError(b & 0x0F),
+            b if b & 0xF0 == 0xE0 => ErrorCode::BlockPermalockError(b & 0x0F),
+            _ => ErrorCode::Unknown(b),
+        }
+    }
+}
+
+impl std::fmt::Display for ErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ErrorCode::Success => write!(f, "Success"),
+            ErrorCode::CommandError => write!(f, "Command error (0x17)"),
+            ErrorCode::FhssFail => write!(f, "FHSS fail (0x20)"),
+            ErrorCode::InventoryFail => write!(f, "Inventory fail - no tag or CRC error (0x15)"),
+            ErrorCode::AccessFail => write!(f, "Access failed - wrong password (0x16)"),
+            ErrorCode::ReadFail => write!(f, "Read failed - no tag response or CRC error (0x09)"),
+            ErrorCode::ReadError(code) => write!(f, "Read error (0xA0|0x{:02X})", code),
+            ErrorCode::WriteFail => write!(f, "Write failed - no tag response or CRC error (0x10)"),
+            ErrorCode::WriteError(code) => write!(f, "Write error (0xB0|0x{:02X})", code),
+            ErrorCode::LockFail => write!(f, "Lock failed (0x13)"),
+            ErrorCode::LockError(code) => write!(f, "Lock error (0xC0|0x{:02X})", code),
+            ErrorCode::KillFail => write!(f, "Kill failed (0x12)"),
+            ErrorCode::KillError(code) => write!(f, "Kill error (0xD0|0x{:02X})", code),
+            ErrorCode::BlockPermalockFail => write!(f, "BlockPermalock failed (0x14)"),
+            ErrorCode::BlockPermalockError(code) => write!(f, "BlockPermalock error (0xE0|0x{:02X})", code),
+            ErrorCode::ChangeConfigFail => write!(f, "ChangeConfig failed (0x1A)"),
+            ErrorCode::ReadProtectFail => write!(f, "ReadProtect failed (0x2A)"),
+            ErrorCode::ResetReadProtectFail => write!(f, "ResetReadProtect failed (0x2B)"),
+            ErrorCode::ChangeEasFail => write!(f, "ChangeEAS failed (0x1B)"),
+            ErrorCode::EasAlarmFail => write!(f, "EAS Alarm failed (0x1D)"),
+            ErrorCode::QtFail => write!(f, "QT failed (0x2E)"),
+            ErrorCode::Unknown(b) => write!(f, "Unknown error (0x{:02X})", b),
+        }
+    }
 }
 
 impl Display for Command {
@@ -60,6 +146,7 @@ impl Display for Command {
             }
             Command::SetWorkingArea(code) => write!(f, "Set Working Area to {}", code),
             Command::SetSelect(params) => write!(f, "Set Select ({} bytes)", params.len()),
+            Command::ReadLabel(params) => write!(f, "Read Label ({} bytes)", params.len()),
             Command::WriteLabel(params) => write!(f, "Write Label ({} bytes)", params.len()),
         }
     }
@@ -114,6 +201,7 @@ impl SerializableCommand for Command {
             Command::StopMultiplePollingInstruction => (vec![0x28], vec![]),
             Command::SetWorkingArea(code) => (vec![0x07], vec![*code]),
             Command::SetSelect(params) => (vec![0x0C], params.to_vec()),
+            Command::ReadLabel(params) => (vec![0x39], params.to_vec()),
             Command::WriteLabel(params) => (vec![0x49], params.to_vec()),
         }
     }

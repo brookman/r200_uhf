@@ -26,6 +26,20 @@ impl Packet {
         data.to_vec()
     }
 
+    /// Returns true if this packet is an error response (command code 0xFF).
+    pub fn is_error(&self) -> bool {
+        self.command_code() == 0xFF
+    }
+
+    /// If this is an error packet, returns the M100 error code byte.
+    pub fn error_code_byte(&self) -> Option<u8> {
+        if self.is_error() {
+            self.get_data().first().copied()
+        } else {
+            None
+        }
+    }
+
     /// Check if packet is valid
     pub fn is_valid(&self) -> bool {
         // If length is incorrect with what is expected

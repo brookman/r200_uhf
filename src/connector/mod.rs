@@ -7,6 +7,7 @@ mod async_impl;
 pub use async_impl::*;
 
 use crate::Rfid;
+use crate::frame::ErrorCode;
 use crate::packet::Packet;
 use log::{debug, error, info};
 use std::fmt;
@@ -118,6 +119,7 @@ pub enum ConnectorError {
     InvalidResponse(String),
     SerialRead(String),
     ErrorStopMultiPolling(String),
+    CommandError(ErrorCode),
 }
 
 impl fmt::Display for ConnectorError {
@@ -133,6 +135,7 @@ impl fmt::Display for ConnectorError {
             ConnectorError::ErrorStopMultiPolling(msg) => {
                 write!(f, "Impossible to stop multiple polling [{msg}]")
             }
+            ConnectorError::CommandError(code) => write!(f, "Command error: {}", code),
         }
     }
 }
@@ -155,6 +158,17 @@ pub(crate) fn hexdump_line(prefix: &str, data: &[u8]) {
         out.push_str(format!("{:02X} ", b).as_str());
     }
     log::debug!("{} {}", prefix, out);
+}
+
+pub(crate) fn parse_hex_str(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap_or(0))
+        .collect()
+}
+
+pub(crate) fn hex_lower(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 pub(crate) fn calculate_transmit_power(p: Packet) -> Result<f64, ConnectorError> {
