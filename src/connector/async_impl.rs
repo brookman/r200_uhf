@@ -31,8 +31,41 @@ pub trait AsyncIO {
     async fn set_working_area(&mut self, area: WorkingArea) -> Result<(), ConnectorError>;
     async fn select_tag(&mut self, epc: &[u8]) -> Result<(), ConnectorError>;
     async fn clear_select(&mut self) -> Result<(), ConnectorError>;
-    async fn read_epc(&mut self, mem_bank: u8, start_addr: u16, length: u16) -> Result<Vec<u8>, ConnectorError>;
+    async fn read_epc(
+        &mut self,
+        mem_bank: u8,
+        start_addr: u16,
+        length: u16,
+    ) -> Result<Vec<u8>, ConnectorError>;
     async fn write_epc(&mut self, epc: &[u8]) -> Result<(), ConnectorError>;
+    /// Write data to a memory bank of the selected tag.
+    ///
+    /// The tag must be selected first (see [`AsyncIO::select_tag`]). `data`
+    /// length must be a multiple of 2 (whole words). `mem_bank` is the Gen2
+    /// memory bank: 0=Reserved, 1=EPC, 2=TID, 3=User.
+    async fn write_mem(
+        &mut self,
+        access_password: &[u8],
+        mem_bank: u8,
+        start_addr: u16,
+        data: &[u8],
+    ) -> Result<(), ConnectorError>;
+    /// Kill a previously selected tag.
+    ///
+    /// The tag must be selected first (see [`AsyncIO::select_tag`]). The kill
+    /// password is 4 bytes; a tag shipped with the default password of
+    /// `00000000` can be killed by any reader.
+    async fn kill_tag(&mut self, kill_password: &[u8]) -> Result<(), ConnectorError>;
+    /// Lock a previously selected tag.
+    ///
+    /// The tag must be selected first (see [`AsyncIO::select_tag`]). The access
+    /// password is 4 bytes and the lock operation is 3 bytes (20-bit
+    /// mask/action payload, e.g. `02 00 80` to lock the USER memory bank).
+    async fn lock_tag(
+        &mut self,
+        access_password: &[u8],
+        lock_data: &[u8],
+    ) -> Result<(), ConnectorError>;
     async fn write_epc_reliable(
         &mut self,
         current_epc: &[u8],
@@ -269,7 +302,12 @@ where
         Err(ConnectorError::NoPacketReceived)
     }
 
-    async fn read_epc(&mut self, mem_bank: u8, start_addr: u16, length: u16) -> Result<Vec<u8>, ConnectorError> {
+    async fn read_epc(
+        &mut self,
+        mem_bank: u8,
+        start_addr: u16,
+        length: u16,
+    ) -> Result<Vec<u8>, ConnectorError> {
         let mut params = Vec::new();
         params.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
         params.push(mem_bank);
@@ -289,13 +327,64 @@ where
     }
 
     async fn write_epc(&mut self, epc: &[u8]) -> Result<(), ConnectorError> {
+        self.write_mem(&[0x00, 0x00, 0x00, 0x00], 0x01, 0x0002, epc)
+            .await
+    }
+
+    async fn write_mem(
+        &mut self,
+        access_password: &[u8],
+        mem_bank: u8,
+        start_addr: u16,
+        data: &[u8],
+    ) -> Result<(), ConnectorError> {
+        if data.len() % 2 != 0 {
+            return Err(ConnectorError::FailedSetting(
+                "write data must be an even number of bytes".to_string(),
+            ));
+        }
+        let word_len = (data.len() / 2) as u16;
         let mut params = Vec::new();
-        params.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
-        params.push(0x01);
-        params.extend_from_slice(&[0x00, 0x02]);
-        params.extend_from_slice(&[0x00, 0x06]);
-        params.extend_from_slice(epc);
+        params.extend_from_slice(access_password);
+        params.push(mem_bank);
+        params.push((start_addr >> 8) as u8);
+        params.push((start_addr & 0xFF) as u8);
+        params.push((word_len >> 8) as u8);
+        params.push((word_len & 0xFF) as u8);
+        params.extend_from_slice(data);
         self.send_packet(Command::WriteLabel(params)).await?;
+        if let Some(p) = self.single_read_from_serial().await? {
+            if p.is_error() {
+                let error_code = ErrorCode::from_byte(p.error_code_byte().unwrap_or(0xFF));
+                return Err(ConnectorError::CommandError(error_code));
+            }
+            return Ok(());
+        }
+        Err(ConnectorError::NoPacketReceived)
+    }
+
+    async fn kill_tag(&mut self, kill_password: &[u8]) -> Result<(), ConnectorError> {
+        let params = kill_password.to_vec();
+        self.send_packet(Command::KillTag(params)).await?;
+        if let Some(p) = self.single_read_from_serial().await? {
+            if p.is_error() {
+                let error_code = ErrorCode::from_byte(p.error_code_byte().unwrap_or(0xFF));
+                return Err(ConnectorError::CommandError(error_code));
+            }
+            return Ok(());
+        }
+        Err(ConnectorError::NoPacketReceived)
+    }
+
+    async fn lock_tag(
+        &mut self,
+        access_password: &[u8],
+        lock_data: &[u8],
+    ) -> Result<(), ConnectorError> {
+        let mut params = Vec::with_capacity(7);
+        params.extend_from_slice(access_password);
+        params.extend_from_slice(lock_data);
+        self.send_packet(Command::LockTag(params)).await?;
         if let Some(p) = self.single_read_from_serial().await? {
             if p.is_error() {
                 let error_code = ErrorCode::from_byte(p.error_code_byte().unwrap_or(0xFF));
@@ -320,13 +409,21 @@ where
             match self.write_epc(new_epc).await {
                 Ok(()) => return Ok(()),
                 Err(ConnectorError::CommandError(ErrorCode::WriteFail)) => {
-                    debug!("[write_epc] attempt {}/{} failed: WriteFail, polling to rediscover tag", attempt + 1, max_retries + 1);
+                    debug!(
+                        "[write_epc] attempt {}/{} failed: WriteFail, polling to rediscover tag",
+                        attempt + 1,
+                        max_retries + 1
+                    );
                     last_err = Some(ConnectorError::CommandError(ErrorCode::WriteFail));
                     self.clear_select().await.ok();
                     if let Ok(tags) = self.single_polling_instruction().await {
                         if let Some(tag) = tags.first() {
                             let discovered = parse_hex_str(&tag.epc);
-                            debug!("[write_epc] rediscovered tag EPC: {} (expected: {})", tag.epc, hex_lower(&select_epc));
+                            debug!(
+                                "[write_epc] rediscovered tag EPC: {} (expected: {})",
+                                tag.epc,
+                                hex_lower(&select_epc)
+                            );
                             select_epc = discovered;
                         }
                     }
@@ -414,5 +511,98 @@ mod tests {
         let mut connector = Connector::new(port);
         let info = connector.get_module_info().await.unwrap();
         assert!(info.contains("Hardware"));
+    }
+
+    // Helper: build a valid device->PC frame with the given command code and data.
+    fn make_rx_frame(cmd: u8, data: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.push(R200_FRAME_HEADER);
+        v.push(0x01); // Device to PC
+        v.push(cmd);
+        let len = data.len() as u16;
+        v.push((len >> 8) as u8);
+        v.push((len & 0xFF) as u8);
+        v.extend_from_slice(data);
+        let sum: u16 = v[1..].iter().map(|&b| b as u16).sum();
+        v.push((sum & 0xFF) as u8);
+        v.push(R200_FRAME_END);
+        v
+    }
+
+    #[tokio::test]
+    async fn test_async_kill_tag_success() {
+        let resp = make_rx_frame(0x65, &[]);
+        let port = MockAsyncPort {
+            read_data: resp,
+            written_data: Arc::new(Mutex::new(Vec::new())),
+        };
+        let mut connector = Connector::new(port);
+        connector.kill_tag(&[0x00, 0x00, 0xFF, 0xFF]).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_async_lock_tag_success() {
+        let resp = make_rx_frame(0x82, &[]);
+        let port = MockAsyncPort {
+            read_data: resp,
+            written_data: Arc::new(Mutex::new(Vec::new())),
+        };
+        let mut connector = Connector::new(port);
+        connector
+            .lock_tag(&[0x00, 0x00, 0xFF, 0xFF], &[0x02, 0x00, 0x80])
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_async_kill_tag_error() {
+        // Error packet: command 0xFF with code 0x12 (KillFail)
+        let resp = make_rx_frame(0xFF, &[0x12]);
+        let port = MockAsyncPort {
+            read_data: resp,
+            written_data: Arc::new(Mutex::new(Vec::new())),
+        };
+        let mut connector = Connector::new(port);
+        let err = connector
+            .kill_tag(&[0x00, 0x00, 0xFF, 0xFF])
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ConnectorError::CommandError(ErrorCode::KillFail)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_async_write_mem_success() {
+        let resp = make_rx_frame(0x49, &[]);
+        let port = MockAsyncPort {
+            read_data: resp,
+            written_data: Arc::new(Mutex::new(Vec::new())),
+        };
+        let mut connector = Connector::new(port);
+        connector
+            .write_mem(&[0x00, 0x00, 0x00, 0x00], 0, 0, &[0x00, 0x00, 0x00, 0x00])
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_async_write_mem_error() {
+        // Error packet: command 0xFF with code 0x10 (WriteFail)
+        let resp = make_rx_frame(0xFF, &[0x10]);
+        let port = MockAsyncPort {
+            read_data: resp,
+            written_data: Arc::new(Mutex::new(Vec::new())),
+        };
+        let mut connector = Connector::new(port);
+        let err = connector
+            .write_mem(&[0x00, 0x00, 0x00, 0x00], 0, 0, &[0x00, 0x00, 0x00, 0x00])
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ConnectorError::CommandError(ErrorCode::WriteFail)
+        ));
     }
 }

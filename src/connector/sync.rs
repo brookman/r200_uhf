@@ -80,9 +80,38 @@ pub trait SyncIO {
     /// Clear the current tag selection.
     fn clear_select(&mut self) -> Result<(), ConnectorError>;
     /// Read EPC and user data from a selected tag.
-    fn read_epc(&mut self, mem_bank: u8, start_addr: u16, length: u16) -> Result<Vec<u8>, ConnectorError>;
+    fn read_epc(
+        &mut self,
+        mem_bank: u8,
+        start_addr: u16,
+        length: u16,
+    ) -> Result<Vec<u8>, ConnectorError>;
     /// Write a new EPC to a tag.
     fn write_epc(&mut self, epc: &[u8]) -> Result<(), ConnectorError>;
+    /// Write data to a memory bank of the selected tag.
+    ///
+    /// The tag must be selected first (see [`SyncIO::select_tag`]). `data`
+    /// length must be a multiple of 2 (whole words). `mem_bank` is the Gen2
+    /// memory bank: 0=Reserved, 1=EPC, 2=TID, 3=User.
+    fn write_mem(
+        &mut self,
+        access_password: &[u8],
+        mem_bank: u8,
+        start_addr: u16,
+        data: &[u8],
+    ) -> Result<(), ConnectorError>;
+    /// Kill a previously selected tag.
+    ///
+    /// The tag must be selected first (see [`SyncIO::select_tag`]). The kill
+    /// password is 4 bytes; a tag shipped with the default password of
+    /// `00000000` can be killed by any reader.
+    fn kill_tag(&mut self, kill_password: &[u8]) -> Result<(), ConnectorError>;
+    /// Lock a previously selected tag.
+    ///
+    /// The tag must be selected first (see [`SyncIO::select_tag`]). The access
+    /// password is 4 bytes and the lock operation is 3 bytes (20-bit
+    /// mask/action payload, e.g. `02 00 80` to lock the USER memory bank).
+    fn lock_tag(&mut self, access_password: &[u8], lock_data: &[u8]) -> Result<(), ConnectorError>;
     /// Write EPC with automatic select + retry.
     fn write_epc_reliable(
         &mut self,
@@ -397,7 +426,12 @@ where
     /// - length: Number of words to read
     ///
     /// Returns the raw data bytes on success.
-    fn read_epc(&mut self, mem_bank: u8, start_addr: u16, length: u16) -> Result<Vec<u8>, ConnectorError> {
+    fn read_epc(
+        &mut self,
+        mem_bank: u8,
+        start_addr: u16,
+        length: u16,
+    ) -> Result<Vec<u8>, ConnectorError> {
         let mut params = Vec::new();
         params.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
         params.push(mem_bank);
@@ -418,13 +452,61 @@ where
     }
 
     fn write_epc(&mut self, epc: &[u8]) -> Result<(), ConnectorError> {
+        self.write_mem(&[0x00, 0x00, 0x00, 0x00], 0x01, 0x0002, epc)
+    }
+
+    fn write_mem(
+        &mut self,
+        access_password: &[u8],
+        mem_bank: u8,
+        start_addr: u16,
+        data: &[u8],
+    ) -> Result<(), ConnectorError> {
+        if data.len() % 2 != 0 {
+            return Err(ConnectorError::FailedSetting(
+                "write data must be an even number of bytes".to_string(),
+            ));
+        }
+        let word_len = (data.len() / 2) as u16;
         let mut params = Vec::new();
-        params.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
-        params.push(0x01);
-        params.extend_from_slice(&[0x00, 0x02]);
-        params.extend_from_slice(&[0x00, 0x06]);
-        params.extend_from_slice(epc);
+        params.extend_from_slice(access_password);
+        params.push(mem_bank);
+        params.push((start_addr >> 8) as u8);
+        params.push((start_addr & 0xFF) as u8);
+        params.push((word_len >> 8) as u8);
+        params.push((word_len & 0xFF) as u8);
+        params.extend_from_slice(data);
         self.send_packet(Command::WriteLabel(params))?;
+        let p = self.single_read_from_serial()?;
+        if let Some(p) = p {
+            if p.is_error() {
+                let error_code = ErrorCode::from_byte(p.error_code_byte().unwrap_or(0xFF));
+                return Err(ConnectorError::CommandError(error_code));
+            }
+            return Ok(());
+        }
+        Err(ConnectorError::NoPacketReceived)
+    }
+
+    fn kill_tag(&mut self, kill_password: &[u8]) -> Result<(), ConnectorError> {
+        let params = kill_password.to_vec();
+        self.send_packet(Command::KillTag(params))?;
+        let p = self.single_read_from_serial()?;
+        if let Some(p) = p {
+            if p.is_error() {
+                let error_code = ErrorCode::from_byte(p.error_code_byte().unwrap_or(0xFF));
+                return Err(ConnectorError::CommandError(error_code));
+            }
+            return Ok(());
+        }
+        Err(ConnectorError::NoPacketReceived)
+    }
+
+    fn lock_tag(&mut self, access_password: &[u8], lock_data: &[u8]) -> Result<(), ConnectorError> {
+        let mut params = Vec::with_capacity(7);
+        params.extend_from_slice(access_password);
+        params.extend_from_slice(lock_data);
+        self.send_packet(Command::LockTag(params))?;
         let p = self.single_read_from_serial()?;
         if let Some(p) = p {
             if p.is_error() {
@@ -456,14 +538,22 @@ where
             match self.write_epc(new_epc) {
                 Ok(()) => return Ok(()),
                 Err(ConnectorError::CommandError(ErrorCode::WriteFail)) => {
-                    debug!("[write_epc] attempt {}/{} failed: WriteFail, polling to rediscover tag", attempt + 1, max_retries + 1);
+                    debug!(
+                        "[write_epc] attempt {}/{} failed: WriteFail, polling to rediscover tag",
+                        attempt + 1,
+                        max_retries + 1
+                    );
                     last_err = Some(ConnectorError::CommandError(ErrorCode::WriteFail));
                     // Tag may have partially written EPC; poll to discover actual EPC
                     self.clear_select().ok();
                     if let Ok(tags) = self.single_polling_instruction() {
                         if let Some(tag) = tags.first() {
                             let discovered = parse_hex_str(&tag.epc);
-                            debug!("[write_epc] rediscovered tag EPC: {} (expected: {})", tag.epc, hex_lower(&select_epc));
+                            debug!(
+                                "[write_epc] rediscovered tag EPC: {} (expected: {})",
+                                tag.epc,
+                                hex_lower(&select_epc)
+                            );
                             select_epc = discovered;
                         }
                     }
@@ -684,6 +774,142 @@ mod tests {
         let mock = MockSerialPort::new(vec![frame]);
         let mut connector = Connector::new(mock);
         connector.set_transmission_power(20.0).unwrap();
+    }
+
+    #[test]
+    fn test_kill_tag_success() {
+        // Response frame for kill (0x65) with no data = success
+        let frame = make_frame(0x65, Some(vec![0x00, 0x00, 0xFF, 0xFF]), &[]);
+        let mock = MockSerialPort::new(vec![frame]);
+        let mut connector = Connector::new(mock);
+        connector.kill_tag(&[0x00, 0x00, 0xFF, 0xFF]).unwrap();
+    }
+
+    #[test]
+    fn test_kill_tag_kill_fail_error() {
+        // Error packet with code 0x12 = KillFail (command 0xFF)
+        let err_packet = {
+            let mut v = Vec::new();
+            v.push(R200_FRAME_HEADER);
+            v.push(0x01);
+            v.push(0xFF); // error command
+            let data = [0x12u8]; // KillFail
+            let len = data.len() as u16;
+            v.push((len >> 8) as u8);
+            v.push((len & 0xFF) as u8);
+            v.extend_from_slice(&data);
+            let sum: u16 = v[1..].iter().map(|&b| b as u16).sum();
+            v.push((sum & 0xFF) as u8);
+            v.push(R200_FRAME_END);
+            ResponseType::Raw(v)
+        };
+        let mock = MockSerialPort::new(vec![err_packet]);
+        let mut connector = Connector::new(mock);
+        let err = connector.kill_tag(&[0x00, 0x00, 0xFF, 0xFF]).unwrap_err();
+        assert!(matches!(
+            err,
+            ConnectorError::CommandError(ErrorCode::KillFail)
+        ));
+    }
+
+    #[test]
+    fn test_lock_tag_success() {
+        // Lock (0x82) with access password + lock data params, empty response = success
+        let frame = make_frame(
+            0x82,
+            Some(vec![0x00, 0x00, 0xFF, 0xFF, 0x02, 0x00, 0x80]),
+            &[],
+        );
+        let mock = MockSerialPort::new(vec![frame]);
+        let mut connector = Connector::new(mock);
+        connector
+            .lock_tag(&[0x00, 0x00, 0xFF, 0xFF], &[0x02, 0x00, 0x80])
+            .unwrap();
+    }
+
+    #[test]
+    fn test_lock_tag_lock_fail_error() {
+        // Error packet with code 0x13 = LockFail
+        let err_packet = {
+            let mut v = Vec::new();
+            v.push(R200_FRAME_HEADER);
+            v.push(0x01);
+            v.push(0xFF);
+            let data = [0x13u8]; // LockFail
+            let len = data.len() as u16;
+            v.push((len >> 8) as u8);
+            v.push((len & 0xFF) as u8);
+            v.extend_from_slice(&data);
+            let sum: u16 = v[1..].iter().map(|&b| b as u16).sum();
+            v.push((sum & 0xFF) as u8);
+            v.push(R200_FRAME_END);
+            ResponseType::Raw(v)
+        };
+        let mock = MockSerialPort::new(vec![err_packet]);
+        let mut connector = Connector::new(mock);
+        let err = connector
+            .lock_tag(&[0x00, 0x00, 0xFF, 0xFF], &[0x02, 0x00, 0x80])
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ConnectorError::CommandError(ErrorCode::LockFail)
+        ));
+    }
+
+    #[test]
+    fn test_write_mem_success() {
+        // Write to reserved bank (0), addr 0, 2 words (4 bytes): 00 00 00 00
+        let frame = make_frame(
+            0x49,
+            Some(vec![
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00,
+            ]),
+            &[],
+        );
+        let mock = MockSerialPort::new(vec![frame]);
+        let mut connector = Connector::new(mock);
+        connector
+            .write_mem(&[0x00, 0x00, 0x00, 0x00], 0, 0, &[0x00, 0x00, 0x00, 0x00])
+            .unwrap();
+    }
+
+    #[test]
+    fn test_write_mem_odd_length_rejected() {
+        let mock = MockSerialPort::new(vec![]);
+        let mut connector = Connector::new(mock);
+        let err = connector
+            .write_mem(&[0x00, 0x00, 0x00, 0x00], 0, 0, &[0x00, 0x01, 0x02])
+            .unwrap_err();
+        assert!(matches!(err, ConnectorError::FailedSetting(_)));
+    }
+
+    #[test]
+    fn test_write_mem_write_fail_error() {
+        // Error packet with code 0x10 = WriteFail
+        let err_packet = {
+            let mut v = Vec::new();
+            v.push(R200_FRAME_HEADER);
+            v.push(0x01);
+            v.push(0xFF);
+            let data = [0x10u8]; // WriteFail
+            let len = data.len() as u16;
+            v.push((len >> 8) as u8);
+            v.push((len & 0xFF) as u8);
+            v.extend_from_slice(&data);
+            let sum: u16 = v[1..].iter().map(|&b| b as u16).sum();
+            v.push((sum & 0xFF) as u8);
+            v.push(R200_FRAME_END);
+            ResponseType::Raw(v)
+        };
+        let mock = MockSerialPort::new(vec![err_packet]);
+        let mut connector = Connector::new(mock);
+        let err = connector
+            .write_mem(&[0x00, 0x00, 0x00, 0x00], 0, 0, &[0x00, 0x00, 0x00, 0x00])
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ConnectorError::CommandError(ErrorCode::WriteFail)
+        ));
     }
 
     #[test]

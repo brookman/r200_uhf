@@ -38,6 +38,8 @@ pub enum Command {
     SetSelect(Vec<u8>),
     ReadLabel(Vec<u8>),
     WriteLabel(Vec<u8>),
+    KillTag(Vec<u8>),
+    LockTag(Vec<u8>),
 }
 
 /// M100 protocol error codes
@@ -113,7 +115,9 @@ impl std::fmt::Display for ErrorCode {
             ErrorCode::KillFail => write!(f, "Kill failed (0x12)"),
             ErrorCode::KillError(code) => write!(f, "Kill error (0xD0|0x{:02X})", code),
             ErrorCode::BlockPermalockFail => write!(f, "BlockPermalock failed (0x14)"),
-            ErrorCode::BlockPermalockError(code) => write!(f, "BlockPermalock error (0xE0|0x{:02X})", code),
+            ErrorCode::BlockPermalockError(code) => {
+                write!(f, "BlockPermalock error (0xE0|0x{:02X})", code)
+            }
             ErrorCode::ChangeConfigFail => write!(f, "ChangeConfig failed (0x1A)"),
             ErrorCode::ReadProtectFail => write!(f, "ReadProtect failed (0x2A)"),
             ErrorCode::ResetReadProtectFail => write!(f, "ResetReadProtect failed (0x2B)"),
@@ -148,6 +152,8 @@ impl Display for Command {
             Command::SetSelect(params) => write!(f, "Set Select ({} bytes)", params.len()),
             Command::ReadLabel(params) => write!(f, "Read Label ({} bytes)", params.len()),
             Command::WriteLabel(params) => write!(f, "Write Label ({} bytes)", params.len()),
+            Command::KillTag(params) => write!(f, "Kill Tag ({} bytes)", params.len()),
+            Command::LockTag(params) => write!(f, "Lock Tag ({} bytes)", params.len()),
         }
     }
 }
@@ -203,6 +209,8 @@ impl SerializableCommand for Command {
             Command::SetSelect(params) => (vec![0x0C], params.to_vec()),
             Command::ReadLabel(params) => (vec![0x39], params.to_vec()),
             Command::WriteLabel(params) => (vec![0x49], params.to_vec()),
+            Command::KillTag(params) => (vec![0x65], params.to_vec()),
+            Command::LockTag(params) => (vec![0x82], params.to_vec()),
         }
     }
 
@@ -328,6 +336,28 @@ mod tests {
     }
 
     #[test]
+    fn kill_tag_frame_bytes() {
+        // Kill: command 0x65, params = 4-byte kill password 0000FFFF
+        let bytes = frame_bytes(Command::KillTag(vec![0x00, 0x00, 0xFF, 0xFF]));
+        let expected = vec![
+            0xAA, 0x00, 0x65, 0x00, 0x04, 0x00, 0x00, 0xFF, 0xFF, 0x67, 0xDD,
+        ];
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn lock_tag_frame_bytes() {
+        // Lock: command 0x82, params = 4-byte access password + 3-byte lock data (LD)
+        let bytes = frame_bytes(Command::LockTag(vec![
+            0x00, 0x00, 0xFF, 0xFF, 0x02, 0x00, 0x80,
+        ]));
+        let expected = vec![
+            0xAA, 0x00, 0x82, 0x00, 0x07, 0x00, 0x00, 0xFF, 0xFF, 0x02, 0x00, 0x80, 0x09, 0xDD,
+        ];
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
     fn serializable_command_to_bytes_and_from_tuple() {
         // to_bytes
         assert_eq!(
@@ -349,6 +379,15 @@ mod tests {
         let (cmd, params) = Command::SetTransmissionPower(26.5).to_bytes();
         assert_eq!(cmd, vec![0xB6]);
         assert_eq!(params, vec![0x0A, 0x5A]); // 26.5 dBm -> 2650 -> 0x0A 0x5A
+
+        assert_eq!(
+            Command::KillTag(vec![0x00, 0x00, 0xFF, 0xFF]).to_bytes(),
+            (vec![0x65], vec![0x00, 0x00, 0xFF, 0xFF])
+        );
+        assert_eq!(
+            Command::LockTag(vec![0x00, 0x00, 0xFF, 0xFF, 0x02, 0x00, 0x80]).to_bytes(),
+            (vec![0x82], vec![0x00, 0x00, 0xFF, 0xFF, 0x02, 0x00, 0x80])
+        );
 
         // from_tuple
         assert!(matches!(
