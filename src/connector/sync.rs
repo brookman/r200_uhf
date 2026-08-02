@@ -123,8 +123,9 @@ pub trait SyncIO {
     /// Kill a previously selected tag.
     ///
     /// The tag must be selected first (see [`SyncIO::select_tag`]). The kill
-    /// password is 4 bytes; a tag shipped with the default password of
-    /// `00000000` can be killed by any reader.
+    /// password is 4 bytes. A tag with the default (all-zero) kill password
+    /// cannot be killed — write a non-zero kill password to reserved memory
+    /// (bank 0, word 0) first, then pass it here.
     fn kill_tag(&mut self, kill_password: &[u8]) -> Result<(), ConnectorError>;
     /// Lock a previously selected tag.
     ///
