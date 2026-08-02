@@ -8,14 +8,18 @@ use crate::rfid::Rfid;
 use log::{debug, error};
 use std::io::{self, Read, Write};
 
+/// Blocking (synchronous) API for talking to the R200 reader.
 pub trait SyncIO {
     type Socket: Read + Write;
     /// Setup the reader with default settings (inspired by e710_uhf)
     fn setup_reader(&mut self) -> Result<(), ConnectorError>;
+    /// Query the reader module info (hardware, software, manufacturer).
     fn get_module_info(&mut self) -> Result<String, ConnectorError>;
     /// Builds and sends the command
     fn send_packet(&mut self, command: Command) -> Result<(), ConnectorError>;
+    /// Read a single response packet from the serial port.
     fn single_read_from_serial(&mut self) -> Result<Option<Packet>, ConnectorError>;
+    /// Read multiple response packets (used by multi-polling).
     fn read_from_serial(
         &mut self,
         num_expected_responses: Option<u32>,
@@ -64,14 +68,17 @@ pub trait SyncIO {
     /// into a collection of Rfid records containing RSSI, PC, EPC (UID) and CRC.
     ///
     /// Returns
-    /// - Ok(Vec<Rfid>) possibly empty if no tags are present.
+    /// - Ok(`Vec<Rfid>`) possibly empty if no tags are present.
     /// - Err(ConnectorError::Timeout or other) on communication errors.
     fn single_polling_instruction(&mut self) -> Result<Vec<Rfid>, ConnectorError>;
+    /// Run a multi-polling inventory round and collect all detected tags.
     fn multi_polling_instruction(&mut self) -> Result<Vec<Rfid>, ConnectorError>; // Start Multi: AA 00 27 00 03 22 FF FF 4A DD
+    /// Enable the reader's repeated multi-polling mode.
     fn enable_multiple_polling_instructions(
         &mut self,
         pool_times: u16,
     ) -> Result<(), ConnectorError>; // Stop Multi: AA 00 28 00 00 28 DD
+    /// Stop the reader's multi-polling mode.
     fn stop_multiple_polling_instructions(&mut self) -> Result<(), ConnectorError>;
     /// Set the regulatory working area on the device.
     fn set_working_area(&mut self, area: WorkingArea) -> Result<(), ConnectorError>;
@@ -339,7 +346,7 @@ where
     /// into a collection of Rfid records containing RSSI, PC, EPC (UID) and CRC.
     ///
     /// Returns
-    /// - Ok(Vec<Rfid>) possibly empty if no tags are present.
+    /// - Ok(`Vec<Rfid>`) possibly empty if no tags are present.
     /// - Err(ConnectorError::Timeout or other) on communication errors.
     fn single_polling_instruction(&mut self) -> Result<Vec<Rfid>, ConnectorError> {
         self.send_packet(Command::SinglePollingInstruction)?;
@@ -604,6 +611,61 @@ mod tests {
 
     fn make_error_frame(i: io::Error) -> ResponseType {
         ResponseType::Error(i)
+    }
+
+    // Build an error response packet carrying the given M100 error code.
+    fn make_error_code(code: u8) -> ResponseType {
+        let mut v = Vec::new();
+        v.push(R200_FRAME_HEADER);
+        v.push(0x01);
+        v.push(0xFF); // error command
+        let data = [code];
+        let len = data.len() as u16;
+        v.push((len >> 8) as u8);
+        v.push((len & 0xFF) as u8);
+        v.extend_from_slice(&data);
+        let sum: u16 = v[1..].iter().map(|&b| b as u16).sum();
+        v.push((sum & 0xFF) as u8);
+        v.push(R200_FRAME_END);
+        ResponseType::Raw(v)
+    }
+
+    // Build a 17-byte tag response frame (RSSI + PC + EPC + CRC).
+    fn tag_frame(cmd: u8, param: Option<Vec<u8>>, epc: &[u8]) -> ResponseType {
+        assert_eq!(epc.len(), 12);
+        let mut data = vec![55, 0x30, 0x00];
+        data.extend_from_slice(epc);
+        data.extend_from_slice(&[0xAB, 0xCD]);
+        assert_eq!(data.len(), 17);
+        make_frame(cmd, param, &data)
+    }
+
+    // Params for select_tag(epc) as sent by the implementation.
+    fn select_params(epc: &[u8]) -> Vec<u8> {
+        let mut params = Vec::new();
+        params.push(0x01);
+        params.extend_from_slice(&[0x00, 0x00, 0x00, 0x20]);
+        params.push(0x60);
+        params.push(0x00);
+        params.extend_from_slice(epc);
+        params
+    }
+
+    // Params for write_epc(epc) as sent by the implementation (bank 1, addr 2).
+    fn write_epc_params(epc: &[u8]) -> Vec<u8> {
+        let mut params = vec![
+            0x00,
+            0x00,
+            0x00,
+            0x00, // access password
+            0x01, // bank 1 = EPC
+            0x00,
+            0x02, // word addr 2
+            0x00,
+            (epc.len() / 2) as u8, // word len
+        ];
+        params.extend_from_slice(epc);
+        params
     }
 
     enum ResponseType {
@@ -1063,5 +1125,197 @@ mod tests {
         let s = "";
         let out = clear_non_ascii(s);
         assert_eq!(out, "");
+    }
+
+    // ----- setup / select / working area / polling / reliable write tests -----
+
+    #[test]
+    fn test_setup_reader_stops_polling() {
+        let stop = make_frame(0x28, None, &[]);
+        let mock = MockSerialPort::new(vec![stop]);
+        let mut connector = Connector::new(mock);
+        connector.setup_reader().unwrap();
+    }
+
+    #[test]
+    fn test_setup_reader_ignores_failure() {
+        // No chats: the stop-polling read times out but setup_reader ignores it.
+        let mock = MockSerialPort::new(vec![]);
+        let mut connector = Connector::new(mock);
+        connector.setup_reader().unwrap();
+    }
+
+    #[test]
+    fn test_select_tag_success() {
+        let epc = [
+            0xE0, 0x28, 0x06, 0x91, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let frame = make_frame(0x0C, Some(select_params(&epc)), &[]);
+        let mock = MockSerialPort::new(vec![frame]);
+        let mut connector = Connector::new(mock);
+        connector.select_tag(&epc).unwrap();
+    }
+
+    #[test]
+    fn test_clear_select_success() {
+        let frame = make_frame(0x0C, Some(vec![0u8; 8]), &[]);
+        let mock = MockSerialPort::new(vec![frame]);
+        let mut connector = Connector::new(mock);
+        connector.clear_select().unwrap();
+    }
+
+    #[test]
+    fn test_set_working_area_success() {
+        let frame = make_frame(0x07, Some(vec![3]), &[]);
+        let mock = MockSerialPort::new(vec![frame]);
+        let mut connector = Connector::new(mock);
+        connector.set_working_area(WorkingArea::EU).unwrap();
+    }
+
+    #[test]
+    fn test_set_working_area_error() {
+        let err = make_error_code(0x16); // AccessFail
+        let mock = MockSerialPort::new(vec![err]);
+        let mut connector = Connector::new(mock);
+        let err = connector.set_working_area(WorkingArea::EU).unwrap_err();
+        assert!(matches!(
+            err,
+            ConnectorError::CommandError(ErrorCode::AccessFail)
+        ));
+    }
+
+    #[test]
+    fn test_multi_polling_instruction_parses_tags() {
+        let epc1 = [
+            0xE0, 0x28, 0x06, 0x91, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+        ];
+        let epc2 = [
+            0xE0, 0x28, 0x06, 0x91, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+        ];
+        let tag1 = tag_frame(0x27, Some(vec![0x00, 0x64]), &epc1);
+        let tag2 = tag_frame(0x27, Some(vec![0x00, 0x64]), &epc2);
+        let timeout = make_error_frame(io::Error::new(io::ErrorKind::TimedOut, "done"));
+        let mock = MockSerialPort::new(vec![tag1, tag2, timeout]);
+        let mut connector = Connector::new(mock);
+        let tags = connector.multi_polling_instruction().unwrap();
+        assert_eq!(tags.len(), 2);
+        let expected: String = epc1.iter().map(|b| format!("{:02X}", b)).collect();
+        assert_eq!(tags[0].uid(), expected);
+    }
+
+    #[test]
+    fn test_stop_multiple_polling_instructions_success() {
+        let frame = make_frame(0x28, None, &[]);
+        let mock = MockSerialPort::new(vec![frame]);
+        let mut connector = Connector::new(mock);
+        connector.stop_multiple_polling_instructions().unwrap();
+    }
+
+    #[test]
+    fn test_stop_multiple_polling_wrong_response() {
+        // Error packet (cmd 0xFF) doesn't map to StopMultiplePollingInstruction.
+        let err = make_error_code(0x12);
+        let mock = MockSerialPort::new(vec![err]);
+        let mut connector = Connector::new(mock);
+        let err = connector.stop_multiple_polling_instructions().unwrap_err();
+        assert!(matches!(err, ConnectorError::ErrorStopMultiPolling(_)));
+    }
+
+    #[test]
+    fn test_write_epc_success() {
+        let epc = [0xE0, 0x28, 0x06, 0x91, 0x05, 0x00];
+        let frame = make_frame(0x49, Some(write_epc_params(&epc)), &[]);
+        let mock = MockSerialPort::new(vec![frame]);
+        let mut connector = Connector::new(mock);
+        connector.write_epc(&epc).unwrap();
+    }
+
+    #[test]
+    fn test_read_epc_convenience() {
+        // read_epc() = read_mem(0000, bank 1, addr 2, 6 words).
+        // Response: ul=14, PC(2), EPC(12), then 12 requested bytes.
+        let mut resp = vec![0x0E];
+        resp.extend_from_slice(&[0x30, 0x00]);
+        resp.extend_from_slice(&[0u8; 12]);
+        resp.extend_from_slice(&[
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0x01, 0x02, 0x03,
+        ]);
+        let params = vec![0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x02, 0x00, 0x06];
+        let frame = make_frame(0x39, Some(params), &resp);
+        let mock = MockSerialPort::new(vec![frame]);
+        let mut connector = Connector::new(mock);
+        let data = connector.read_epc().unwrap();
+        assert_eq!(
+            data,
+            vec![
+                0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0x01, 0x02, 0x03
+            ]
+        );
+    }
+
+    #[test]
+    fn test_write_epc_reliable_success_first_try() {
+        let current = [0xE0, 0x28, 0x06, 0x91, 0x05, 0x00];
+        let new = [0xE0, 0x28, 0x06, 0x91, 0x05, 0x01];
+        let select = make_frame(0x0C, Some(select_params(&current)), &[]);
+        let write = make_frame(0x49, Some(write_epc_params(&new)), &[]);
+        let mock = MockSerialPort::new(vec![select, write]);
+        let mut connector = Connector::new(mock);
+        connector.write_epc_reliable(&current, &new, 1).unwrap();
+    }
+
+    #[test]
+    fn test_write_epc_reliable_rediscover_and_retry() {
+        let current = [0xE0, 0x28, 0x06, 0x91, 0x05, 0x00];
+        // 12-byte EPC the tag actually ends up with after the partial write.
+        let rediscovered = [
+            0xE0, 0x28, 0x06, 0x91, 0x05, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let new = [0xE0, 0x28, 0x06, 0x91, 0x05, 0x01];
+
+        // attempt 0: select ok, then write -> WriteFail (0x10)
+        let select0 = make_frame(0x0C, Some(select_params(&current)), &[]);
+        let write_fail = make_error_code(0x10);
+
+        // rediscovery: clear select ok, poll returns the new EPC, then timeout
+        let clear = make_frame(0x0C, Some(vec![0u8; 8]), &[]);
+        let poll = tag_frame(0x22, None, &rediscovered);
+        let timeout = make_error_frame(io::Error::new(io::ErrorKind::TimedOut, "done"));
+
+        // attempt 1: select with rediscovered EPC, write ok
+        let select1 = make_frame(0x0C, Some(select_params(&rediscovered)), &[]);
+        let write_ok = make_frame(0x49, Some(write_epc_params(&new)), &[]);
+
+        let mock = MockSerialPort::new(vec![
+            select0, write_fail, clear, poll, timeout, select1, write_ok,
+        ]);
+        let mut connector = Connector::new(mock);
+        connector.write_epc_reliable(&current, &new, 1).unwrap();
+    }
+
+    #[test]
+    fn test_write_epc_reliable_exhausts_retries() {
+        let current = [0xE0, 0x28, 0x06, 0x91, 0x05, 0x00];
+        let new = [0xE0, 0x28, 0x06, 0x91, 0x05, 0x01];
+        let mock = MockSerialPort::new(vec![
+            make_frame(0x0C, Some(select_params(&current)), &[]),
+            make_error_code(0x10),
+        ]);
+        let mut connector = Connector::new(mock);
+        // max_retries=0 -> a single WriteFail attempt, no retry
+        let err = connector.write_epc_reliable(&current, &new, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            ConnectorError::CommandError(ErrorCode::WriteFail)
+        ));
+    }
+
+    #[test]
+    fn test_no_packet_received() {
+        // Read returns Ok(0) -> read_from_serial yields Ok(None) -> NoPacketReceived.
+        let mock = MockSerialPort::new(vec![ResponseType::Raw(vec![])]);
+        let mut connector = Connector::new(mock);
+        let err = connector.get_working_area().unwrap_err();
+        assert!(matches!(err, ConnectorError::NoPacketReceived));
     }
 }

@@ -1,12 +1,17 @@
 use std::fmt::Display;
 use std::hash::Hash;
 
+/// A tag detected during an inventory, with its radio and identifier fields.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Debug)]
 pub struct Rfid {
+    /// Received signal strength indicator from the reader.
     pub rssi: u8,
+    /// Protocol-control word of the tag, as hex.
     pub pc: String,
-    pub epc: String, // also known as the tag UID
+    /// EPC of the tag, as hex (also known as the tag UID).
+    pub epc: String,
+    /// CRC of the tag response, as hex.
     pub crc: String,
     pub(crate) raw: Vec<u8>,
 }
@@ -53,6 +58,7 @@ impl Display for Rfid {
 }
 
 impl Rfid {
+    /// The tag UID (EPC) as an uppercase hex string.
     pub fn uid(&self) -> String {
         self.epc.clone()
     }
@@ -86,5 +92,17 @@ mod tests {
         assert_eq!(packet.pc, "3000");
         assert_eq!(packet.epc, "E28069150000501D63E2784F");
         assert_eq!(packet.crc, "B0B7");
+    }
+
+    #[test]
+    fn uid_matches_epc() {
+        let intake = "BC3000E28069150000501D63E2784FB0B7";
+        let bytes: Vec<u8> = (0..intake.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&intake[i..i + 2], 16).unwrap())
+            .collect();
+
+        let packet = Rfid::from_raw(bytes);
+        assert_eq!(packet.uid(), "E28069150000501D63E2784F");
     }
 }

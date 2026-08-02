@@ -18,7 +18,7 @@ pub struct Connector<P> {
 }
 
 impl<P> Connector<P> {
-    /// Create a new Connector from an already opened SerialPort.
+    /// Create a new Connector wrapping an open serial port.
     pub fn new(port: P) -> Self {
         Connector { port }
     }
@@ -85,6 +85,7 @@ impl<P> Connector<P> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+/// Regulatory working area (RF band) configured on the reader.
 pub enum WorkingArea {
     China900Mhz,
     China800Mhz,
@@ -94,6 +95,7 @@ pub enum WorkingArea {
 }
 
 impl WorkingArea {
+    /// Convert a channel-index response packet into a frequency in MHz for this area.
     pub fn packet_to_64(&self, p: Packet) -> f64 {
         let data = p.get_data();
         if data.is_empty() {
@@ -109,16 +111,26 @@ impl WorkingArea {
     }
 }
 
+/// Errors produced by the R200 protocol layer.
 #[derive(Debug)]
 pub enum ConnectorError {
+    /// Underlying serial I/O failure.
     Io(io::Error),
+    /// Serial timeout while waiting for a response.
     Timeout,
+    /// Reader reported an unknown working area code.
     InvalidWorkingArea,
+    /// No response packet was received.
     NoPacketReceived,
+    /// A setting could not be applied.
     FailedSetting(String),
+    /// A response had an unexpected shape or contents.
     InvalidResponse(String),
+    /// A serial read failed unexpectedly.
     SerialRead(String),
+    /// Stopping multiple polling failed.
     ErrorStopMultiPolling(String),
+    /// The reader returned a protocol error code.
     CommandError(ErrorCode),
 }
 

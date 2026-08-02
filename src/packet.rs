@@ -2,6 +2,7 @@ use crate::frame::SerializableCommand;
 use crate::frame::{Command, FrameError};
 use std::fmt::Display;
 
+/// A raw frame received from the reader, with helpers to decode its fields.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Packet {
     raw_data: Vec<u8>,
@@ -168,5 +169,27 @@ mod tests {
         incorrect_bytes[4] = 0x10;
         let p = Packet::new(incorrect_bytes);
         assert!(!p.is_valid());
+    }
+
+    #[test]
+    fn error_packet_detection() {
+        let err = Packet::new(build_packet(0x00, 0xFF, &[0x10])); // WriteFail
+        assert!(err.is_error());
+        assert_eq!(err.error_code_byte(), Some(0x10));
+
+        let ok = Packet::new(build_packet(0x00, 0x22, &[])); // normal response
+        assert!(!ok.is_error());
+        assert_eq!(ok.error_code_byte(), None);
+
+        // Empty error data: no code byte to extract
+        let empty = Packet::new(build_packet(0x00, 0xFF, &[]));
+        assert!(empty.is_error());
+        assert_eq!(empty.error_code_byte(), None);
+    }
+
+    #[test]
+    fn command_mapping_set_working_area() {
+        let p = Packet::new(build_packet(0x00, 0x07, &[0x03])); // EU = 3
+        assert!(matches!(p.command().unwrap(), Command::SetWorkingArea(3)));
     }
 }

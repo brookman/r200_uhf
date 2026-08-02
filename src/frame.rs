@@ -8,8 +8,10 @@ pub const R200_FRAME_END: u8 = 0xDD;
 const FRAME_TYPE_SEND_COMMAND: u8 = 0x00; // from PC to R200
 const INSTRUCTION_READER_WRITER_MODULE_INFO: u8 = 0x03; // Get reader/writer module information
 
+/// Error produced while parsing a command from a response packet.
 #[derive(Debug)]
 pub enum FrameError {
+    /// The command code does not map to any known command.
     InvalidCommand(String),
 }
 
@@ -23,6 +25,7 @@ impl Display for FrameError {
 
 impl std::error::Error for FrameError {}
 
+/// A command sent to or received from the R200 reader.
 pub enum Command {
     GetWorkingChannel,
     GetWorkingArea,
@@ -42,7 +45,7 @@ pub enum Command {
     LockTag(Vec<u8>),
 }
 
-/// M100 protocol error codes
+/// M100 protocol error codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCode {
     Success,
@@ -70,6 +73,7 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
+    /// Map a protocol error byte to an [`ErrorCode`].
     pub fn from_byte(b: u8) -> Self {
         match b {
             0x00 => ErrorCode::Success,
@@ -354,6 +358,68 @@ mod tests {
     }
 
     #[test]
+    fn get_working_area_frame_bytes() {
+        let bytes = frame_bytes(Command::GetWorkingArea);
+        let expected = vec![0xAA, 0x00, 0x08, 0x00, 0x00, 0x08, 0xDD];
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn set_working_area_frame_bytes() {
+        // EU = 3
+        let bytes = frame_bytes(Command::SetWorkingArea(3));
+        let expected = vec![0xAA, 0x00, 0x07, 0x00, 0x01, 0x03, 0x0B, 0xDD];
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn set_select_frame_bytes() {
+        let bytes = frame_bytes(Command::SetSelect(vec![0x01, 0x02, 0x03]));
+        let expected = vec![0xAA, 0x00, 0x0C, 0x00, 0x03, 0x01, 0x02, 0x03, 0x15, 0xDD];
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn read_label_frame_bytes() {
+        // Read bank 1 (EPC), addr 2, 6 words with zero access password
+        let params = vec![0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x02, 0x00, 0x06];
+        let bytes = frame_bytes(Command::ReadLabel(params));
+        let expected = vec![
+            0xAA, 0x00, 0x39, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x02, 0x00, 0x06,
+            0x4B, 0xDD,
+        ];
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn write_label_frame_bytes() {
+        // Write 2 words (4 bytes) to reserved bank (0), addr 0, no password
+        let params = vec![
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x12, 0x34, 0x56, 0x78,
+        ];
+        let bytes = frame_bytes(Command::WriteLabel(params));
+        let expected = vec![
+            0xAA, 0x00, 0x49, 0x00, 0x0D, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+            0x12, 0x34, 0x56, 0x78, 0x6C, 0xDD,
+        ];
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn multiple_polling_instruction_frame_bytes() {
+        let bytes = frame_bytes(Command::MultiplePollingInstruction(100));
+        let expected = vec![0xAA, 0x00, 0x27, 0x00, 0x02, 0x00, 0x64, 0x8D, 0xDD];
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn stop_multiple_polling_instruction_frame_bytes() {
+        let bytes = frame_bytes(Command::StopMultiplePollingInstruction);
+        let expected = vec![0xAA, 0x00, 0x28, 0x00, 0x00, 0x28, 0xDD];
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
     fn serializable_command_to_bytes_and_from_tuple() {
         // to_bytes
         assert_eq!(
@@ -427,5 +493,51 @@ mod tests {
             .expect("expected error");
         let msg = format!("{}", err);
         assert!(msg.contains("Invalid command"));
+    }
+
+    #[test]
+    fn error_code_from_byte_maps_failures() {
+        assert_eq!(ErrorCode::from_byte(0x00), ErrorCode::Success);
+        assert_eq!(ErrorCode::from_byte(0x09), ErrorCode::ReadFail);
+        assert_eq!(ErrorCode::from_byte(0x10), ErrorCode::WriteFail);
+        assert_eq!(ErrorCode::from_byte(0x12), ErrorCode::KillFail);
+        assert_eq!(ErrorCode::from_byte(0x13), ErrorCode::LockFail);
+        assert_eq!(ErrorCode::from_byte(0x14), ErrorCode::BlockPermalockFail);
+        assert_eq!(ErrorCode::from_byte(0x15), ErrorCode::InventoryFail);
+        assert_eq!(ErrorCode::from_byte(0x16), ErrorCode::AccessFail);
+        assert_eq!(ErrorCode::from_byte(0x17), ErrorCode::CommandError);
+        assert_eq!(ErrorCode::from_byte(0x1A), ErrorCode::ChangeConfigFail);
+        assert_eq!(ErrorCode::from_byte(0x1B), ErrorCode::ChangeEasFail);
+        assert_eq!(ErrorCode::from_byte(0x1D), ErrorCode::EasAlarmFail);
+        assert_eq!(ErrorCode::from_byte(0x20), ErrorCode::FhssFail);
+        assert_eq!(ErrorCode::from_byte(0x2A), ErrorCode::ReadProtectFail);
+        assert_eq!(ErrorCode::from_byte(0x2B), ErrorCode::ResetReadProtectFail);
+        assert_eq!(ErrorCode::from_byte(0x2E), ErrorCode::QtFail);
+    }
+
+    #[test]
+    fn error_code_from_byte_maps_specific_error_ranges() {
+        assert_eq!(ErrorCode::from_byte(0xA3), ErrorCode::ReadError(3));
+        assert_eq!(ErrorCode::from_byte(0xB7), ErrorCode::WriteError(7));
+        assert_eq!(ErrorCode::from_byte(0xC1), ErrorCode::LockError(1));
+        assert_eq!(ErrorCode::from_byte(0xD0), ErrorCode::KillError(0));
+        assert_eq!(
+            ErrorCode::from_byte(0xEF),
+            ErrorCode::BlockPermalockError(0xF)
+        );
+    }
+
+    #[test]
+    fn error_code_from_byte_maps_unknown() {
+        assert_eq!(ErrorCode::from_byte(0x01), ErrorCode::Unknown(0x01));
+        assert_eq!(ErrorCode::from_byte(0xFF), ErrorCode::Unknown(0xFF));
+    }
+
+    #[test]
+    fn error_code_display_includes_code() {
+        let msg = format!("{}", ErrorCode::WriteFail);
+        assert!(msg.contains("0x10"));
+        let msg = format!("{}", ErrorCode::Unknown(0x42));
+        assert!(msg.contains("0x42"));
     }
 }
