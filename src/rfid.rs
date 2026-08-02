@@ -16,9 +16,9 @@ impl Rfid {
         let rssi = raw[0];
 
         Self {
-            pc: bytes_to_hex_upper(&raw[1..3].to_vec()),
+            pc: bytes_to_hex_upper(&raw[1..3]),
             epc: bytes_to_hex_upper(&raw[3..15]),
-            crc: bytes_to_hex_upper(&raw[15..17].to_vec()),
+            crc: bytes_to_hex_upper(&raw[15..17]),
             rssi,
             raw,
         }

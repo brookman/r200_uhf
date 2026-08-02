@@ -257,10 +257,10 @@ where
     async fn stop_multiple_polling_instructions(&mut self) -> Result<(), ConnectorError> {
         self.send_packet(Command::StopMultiplePollingInstruction)
             .await?;
-        if let Some(p) = self.single_read_from_serial().await? {
-            if matches!(p.command(), Ok(Command::StopMultiplePollingInstruction)) {
-                return Ok(());
-            }
+        if let Some(p) = self.single_read_from_serial().await?
+            && matches!(p.command(), Ok(Command::StopMultiplePollingInstruction))
+        {
+            return Ok(());
         }
         Err(ConnectorError::ErrorStopMultiPolling(
             "Failed to stop multi polling".into(),
@@ -354,7 +354,7 @@ where
         start_addr: u16,
         data: &[u8],
     ) -> Result<(), ConnectorError> {
-        if data.len() % 2 != 0 {
+        if !data.len().is_multiple_of(2) {
             return Err(ConnectorError::FailedSetting(
                 "write data must be an even number of bytes".to_string(),
             ));
@@ -432,16 +432,16 @@ where
                     );
                     last_err = Some(ConnectorError::CommandError(ErrorCode::WriteFail));
                     self.clear_select().await.ok();
-                    if let Ok(tags) = self.single_polling_instruction().await {
-                        if let Some(tag) = tags.first() {
-                            let discovered = parse_hex_str(&tag.epc);
-                            debug!(
-                                "[write_epc] rediscovered tag EPC: {} (expected: {})",
-                                tag.epc,
-                                hex_lower(&select_epc)
-                            );
-                            select_epc = discovered;
-                        }
+                    if let Ok(tags) = self.single_polling_instruction().await
+                        && let Some(tag) = tags.first()
+                    {
+                        let discovered = parse_hex_str(&tag.epc);
+                        debug!(
+                            "[write_epc] rediscovered tag EPC: {} (expected: {})",
+                            tag.epc,
+                            hex_lower(&select_epc)
+                        );
+                        select_epc = discovered;
                     }
                 }
                 Err(e) => return Err(e),

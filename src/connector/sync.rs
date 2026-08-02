@@ -468,7 +468,7 @@ where
         start_addr: u16,
         data: &[u8],
     ) -> Result<(), ConnectorError> {
-        if data.len() % 2 != 0 {
+        if !data.len().is_multiple_of(2) {
             return Err(ConnectorError::FailedSetting(
                 "write data must be an even number of bytes".to_string(),
             ));
@@ -552,16 +552,16 @@ where
                     last_err = Some(ConnectorError::CommandError(ErrorCode::WriteFail));
                     // Tag may have partially written EPC; poll to discover actual EPC
                     self.clear_select().ok();
-                    if let Ok(tags) = self.single_polling_instruction() {
-                        if let Some(tag) = tags.first() {
-                            let discovered = parse_hex_str(&tag.epc);
-                            debug!(
-                                "[write_epc] rediscovered tag EPC: {} (expected: {})",
-                                tag.epc,
-                                hex_lower(&select_epc)
-                            );
-                            select_epc = discovered;
-                        }
+                    if let Ok(tags) = self.single_polling_instruction()
+                        && let Some(tag) = tags.first()
+                    {
+                        let discovered = parse_hex_str(&tag.epc);
+                        debug!(
+                            "[write_epc] rediscovered tag EPC: {} (expected: {})",
+                            tag.epc,
+                            hex_lower(&select_epc)
+                        );
+                        select_epc = discovered;
                     }
                 }
                 Err(e) => return Err(e),
@@ -663,11 +663,7 @@ mod tests {
                             // controllo che sia impostato il valore 1 di lunghezza parametri (posizione 4) e
                             // che il parametro sia impostato corettamente (posizione 5)
                             let params = &last_write[5..5 + p.len()];
-                            if last_write[4] == (p.len() as u8) && p == params {
-                                parameter_is_valid = true;
-                            } else {
-                                parameter_is_valid = false;
-                            }
+                            parameter_is_valid = last_write[4] == (p.len() as u8) && p == params;
                         } else {
                             parameter_is_valid = true
                         }
@@ -682,10 +678,10 @@ mod tests {
                                 Err(e) => Err(e),
                             }
                         } else {
-                            return Err(io::Error::new(
+                            Err(io::Error::new(
                                 io::ErrorKind::InvalidInput,
                                 "Sequenza di comandi non prevista",
-                            ));
+                            ))
                         }
                     } else {
                         // nel caso non abbiamo ricevuto nessuno comando di scrittura vuol dire
@@ -696,7 +692,7 @@ mod tests {
                         Ok(n)
                     }
                 }
-                ResponseType::Error(e) => return Err(e),
+                ResponseType::Error(e) => Err(e),
                 ResponseType::Raw(bytes) => {
                     let n = bytes.len().min(buf.len());
                     buf[..n].copy_from_slice(&bytes[..n]);

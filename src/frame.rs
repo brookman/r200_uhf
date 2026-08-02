@@ -192,16 +192,12 @@ impl SerializableCommand for Command {
             Command::AcquireTransmitPower => (vec![0xB7], vec![]),
             Command::SetTransmissionPower(p) => {
                 let power = (p * 100.0) as u16;
-                let mut v = Vec::new();
-                v.push((power >> 8) as u8);
-                v.push((power & 0xFF) as u8);
+                let v = vec![(power >> 8) as u8, (power & 0xFF) as u8];
                 (vec![0xB6], v)
             }
             Command::SinglePollingInstruction => (vec![0x22], vec![]),
             Command::MultiplePollingInstruction(max) => {
-                let mut v = Vec::new();
-                v.push((max >> 8) as u8);
-                v.push((max & 0xFF) as u8);
+                let v = vec![(max >> 8) as u8, (max & 0xFF) as u8];
                 (vec![0x27], v)
             }
             Command::StopMultiplePollingInstruction => (vec![0x28], vec![]),

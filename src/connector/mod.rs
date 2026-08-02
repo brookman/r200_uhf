@@ -100,11 +100,11 @@ impl WorkingArea {
             return 0.0;
         }
         match self {
-            WorkingArea::China900Mhz => return (data[0] as f64) * 0.25 + 920.125,
-            WorkingArea::China800Mhz => return (data[0] as f64) * 0.25 + 840.125,
-            WorkingArea::US => return (data[0] as f64) * 0.50 + 902.25,
-            WorkingArea::EU => return (data[0] as f64) * 0.2 + 865.1,
-            WorkingArea::Korea => return (data[0] as f64) * 0.2 + 917.1,
+            WorkingArea::China900Mhz => (data[0] as f64) * 0.25 + 920.125,
+            WorkingArea::China800Mhz => (data[0] as f64) * 0.25 + 840.125,
+            WorkingArea::US => (data[0] as f64) * 0.50 + 902.25,
+            WorkingArea::EU => (data[0] as f64) * 0.2 + 865.1,
+            WorkingArea::Korea => (data[0] as f64) * 0.2 + 917.1,
         }
     }
 }

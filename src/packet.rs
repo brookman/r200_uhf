@@ -73,7 +73,7 @@ impl Packet {
 impl Display for Packet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let out = {
-            if let Ok(text) = std::str::from_utf8(&*self.get_data()) {
+            if let Ok(text) = std::str::from_utf8(&self.get_data()) {
                 text.to_string()
             } else {
                 "Invalid UTF-8".to_string()
@@ -90,12 +90,13 @@ mod tests {
     // Helper to build a raw packet vector: [HEADER, TYPE, CMD, LEN_HI, LEN_LO, DATA..., CHECKSUM, END]
     fn build_packet(frame_type: u8, cmd: u8, data: &[u8]) -> Vec<u8> {
         let len = data.len() as u16;
-        let mut v = Vec::new();
-        v.push(crate::frame::R200_FRAME_HEADER);
-        v.push(frame_type);
-        v.push(cmd);
-        v.push((len >> 8) as u8);
-        v.push((len & 0xFF) as u8);
+        let mut v = vec![
+            crate::frame::R200_FRAME_HEADER,
+            frame_type,
+            cmd,
+            (len >> 8) as u8,
+            (len & 0xFF) as u8,
+        ];
         v.extend_from_slice(data);
         // checksum is sum of bytes from index 1 (type) to last data byte, low 8 bits
         let sum: u16 = v[1..].iter().map(|&b| b as u16).sum();
