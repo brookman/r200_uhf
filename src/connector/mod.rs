@@ -148,6 +148,27 @@ impl From<io::Error> for ConnectorError {
     }
 }
 
+/// Strip the RSSI/PC/EPC framing from a ReadData response.
+///
+/// The response payload is laid out as:
+/// - `[0]` = `ul`, the byte length of the PC + EPC section
+/// - `[1..1+ul]` = PC (2 bytes) + EPC (`ul - 2` bytes)
+/// - `[1+ul..]` = the requested memory words
+pub(crate) fn strip_read_framing(data: &[u8]) -> Result<Vec<u8>, ConnectorError> {
+    let Some(&ul) = data.first() else {
+        return Err(ConnectorError::InvalidResponse(
+            "Empty read data response".into(),
+        ));
+    };
+    let ul = ul as usize;
+    if data.len() < 1 + ul {
+        return Err(ConnectorError::InvalidResponse(
+            "Truncated read data response".into(),
+        ));
+    }
+    Ok(data[1 + ul..].to_vec())
+}
+
 pub(crate) fn clear_non_ascii(s: &str) -> String {
     s.chars().filter(|c| c.is_ascii()).collect()
 }

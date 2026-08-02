@@ -1,6 +1,6 @@
 use crate::connector::{
     Connector, ConnectorError, WorkingArea, calculate_transmit_power, clear_non_ascii, hex_lower,
-    hexdump_line, parse_hex_str,
+    hexdump_line, parse_hex_str, strip_read_framing,
 };
 use crate::frame::{Command, ErrorCode, Frame, R200_FRAME_END, R200_FRAME_HEADER};
 use crate::packet::Packet;
@@ -31,12 +31,27 @@ pub trait AsyncIO {
     async fn set_working_area(&mut self, area: WorkingArea) -> Result<(), ConnectorError>;
     async fn select_tag(&mut self, epc: &[u8]) -> Result<(), ConnectorError>;
     async fn clear_select(&mut self) -> Result<(), ConnectorError>;
-    async fn read_epc(
+    /// Read data from a selected tag's memory bank.
+    ///
+    /// `access_password` is 4 bytes (use `00000000` unless a non-default
+    /// access password is set). `mem_bank` is the Gen2 memory bank:
+    /// 0=Reserved, 1=EPC, 2=TID, 3=User. `start_addr` is the starting word
+    /// address and `length` is the number of words to read.
+    ///
+    /// Returns only the requested words; the RSSI/PC/EPC framing of the
+    /// reader response is stripped.
+    async fn read_mem(
         &mut self,
+        access_password: &[u8],
         mem_bank: u8,
         start_addr: u16,
         length: u16,
     ) -> Result<Vec<u8>, ConnectorError>;
+    /// Read the EPC of the selected tag (convenience over [`AsyncIO::read_mem`]).
+    async fn read_epc(&mut self) -> Result<Vec<u8>, ConnectorError> {
+        self.read_mem(&[0x00, 0x00, 0x00, 0x00], 0x01, 0x0002, 6)
+            .await
+    }
     async fn write_epc(&mut self, epc: &[u8]) -> Result<(), ConnectorError>;
     /// Write data to a memory bank of the selected tag.
     ///
@@ -302,14 +317,15 @@ where
         Err(ConnectorError::NoPacketReceived)
     }
 
-    async fn read_epc(
+    async fn read_mem(
         &mut self,
+        access_password: &[u8],
         mem_bank: u8,
         start_addr: u16,
         length: u16,
     ) -> Result<Vec<u8>, ConnectorError> {
         let mut params = Vec::new();
-        params.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+        params.extend_from_slice(access_password);
         params.push(mem_bank);
         params.push((start_addr >> 8) as u8);
         params.push((start_addr & 0xFF) as u8);
@@ -321,7 +337,7 @@ where
                 let error_code = ErrorCode::from_byte(p.error_code_byte().unwrap_or(0xFF));
                 return Err(ConnectorError::CommandError(error_code));
             }
-            return Ok(p.get_data());
+            return strip_read_framing(&p.get_data());
         }
         Err(ConnectorError::NoPacketReceived)
     }
@@ -570,6 +586,43 @@ mod tests {
         assert!(matches!(
             err,
             ConnectorError::CommandError(ErrorCode::KillFail)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_async_read_mem_success() {
+        let mut resp = vec![0x0E];
+        resp.extend_from_slice(&[0x30, 0x00]);
+        resp.extend_from_slice(&[0u8; 12]);
+        resp.extend_from_slice(&[0x12, 0x34, 0x56, 0x78]);
+        let resp = make_rx_frame(0x39, &resp);
+        let port = MockAsyncPort {
+            read_data: resp,
+            written_data: Arc::new(Mutex::new(Vec::new())),
+        };
+        let mut connector = Connector::new(port);
+        let data = connector
+            .read_mem(&[0x12, 0x34, 0x56, 0x78], 0, 0, 2)
+            .await
+            .unwrap();
+        assert_eq!(data, vec![0x12, 0x34, 0x56, 0x78]);
+    }
+
+    #[tokio::test]
+    async fn test_async_read_mem_error() {
+        let resp = make_rx_frame(0xFF, &[0x10]);
+        let port = MockAsyncPort {
+            read_data: resp,
+            written_data: Arc::new(Mutex::new(Vec::new())),
+        };
+        let mut connector = Connector::new(port);
+        let err = connector
+            .read_mem(&[0x00, 0x00, 0x00, 0x00], 0, 0, 2)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ConnectorError::CommandError(ErrorCode::WriteFail)
         ));
     }
 

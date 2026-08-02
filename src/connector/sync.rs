@@ -1,6 +1,6 @@
 use crate::connector::{
     Connector, ConnectorError, WorkingArea, calculate_transmit_power, clear_non_ascii, hex_lower,
-    hexdump_line, parse_hex_str,
+    hexdump_line, parse_hex_str, strip_read_framing,
 };
 use crate::frame::{Command, ErrorCode, Frame, R200_FRAME_END, R200_FRAME_HEADER};
 use crate::packet::Packet;
@@ -79,13 +79,26 @@ pub trait SyncIO {
     fn select_tag(&mut self, epc: &[u8]) -> Result<(), ConnectorError>;
     /// Clear the current tag selection.
     fn clear_select(&mut self) -> Result<(), ConnectorError>;
-    /// Read EPC and user data from a selected tag.
-    fn read_epc(
+    /// Read data from a selected tag's memory bank.
+    ///
+    /// `access_password` is 4 bytes (use `00000000` unless a non-default
+    /// access password is set). `mem_bank` is the Gen2 memory bank:
+    /// 0=Reserved, 1=EPC, 2=TID, 3=User. `start_addr` is the starting word
+    /// address and `length` is the number of words to read.
+    ///
+    /// Returns only the requested words; the RSSI/PC/EPC framing of the
+    /// reader response is stripped.
+    fn read_mem(
         &mut self,
+        access_password: &[u8],
         mem_bank: u8,
         start_addr: u16,
         length: u16,
     ) -> Result<Vec<u8>, ConnectorError>;
+    /// Read the EPC of the selected tag (convenience over [`SyncIO::read_mem`]).
+    fn read_epc(&mut self) -> Result<Vec<u8>, ConnectorError> {
+        self.read_mem(&[0x00, 0x00, 0x00, 0x00], 0x01, 0x0002, 6)
+    }
     /// Write a new EPC to a tag.
     fn write_epc(&mut self, epc: &[u8]) -> Result<(), ConnectorError>;
     /// Write data to a memory bank of the selected tag.
@@ -418,22 +431,15 @@ where
         Err(ConnectorError::NoPacketReceived)
     }
 
-    /// Read data from a selected tag.
-    ///
-    /// Parameters:
-    /// - mem_bank: Memory bank to read (0x00=Reserved, 0x01=EPC, 0x02=TID, 0x03=User)
-    /// - start_addr: Starting word address (0-based)
-    /// - length: Number of words to read
-    ///
-    /// Returns the raw data bytes on success.
-    fn read_epc(
+    fn read_mem(
         &mut self,
+        access_password: &[u8],
         mem_bank: u8,
         start_addr: u16,
         length: u16,
     ) -> Result<Vec<u8>, ConnectorError> {
         let mut params = Vec::new();
-        params.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+        params.extend_from_slice(access_password);
         params.push(mem_bank);
         params.push((start_addr >> 8) as u8);
         params.push((start_addr & 0xFF) as u8);
@@ -446,7 +452,7 @@ where
                 let error_code = ErrorCode::from_byte(p.error_code_byte().unwrap_or(0xFF));
                 return Err(ConnectorError::CommandError(error_code));
             }
-            return Ok(p.get_data());
+            return strip_read_framing(&p.get_data());
         }
         Err(ConnectorError::NoPacketReceived)
     }
@@ -854,6 +860,79 @@ mod tests {
             err,
             ConnectorError::CommandError(ErrorCode::LockFail)
         ));
+    }
+
+    #[test]
+    fn test_read_mem_success() {
+        // Read 2 words from reserved bank (0), addr 0, with access password.
+        // Response payload: ul=14 (PC 2 + EPC 12), PC 0x3000, 12-byte EPC,
+        // then the 4 requested data bytes.
+        let mut resp = vec![0x0E];
+        resp.extend_from_slice(&[0x30, 0x00]);
+        resp.extend_from_slice(&[0u8; 12]);
+        resp.extend_from_slice(&[0x12, 0x34, 0x56, 0x78]);
+        let frame = make_frame(
+            0x39,
+            Some(vec![0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x00, 0x02]),
+            &resp,
+        );
+        let mock = MockSerialPort::new(vec![frame]);
+        let mut connector = Connector::new(mock);
+        let data = connector
+            .read_mem(&[0x12, 0x34, 0x56, 0x78], 0, 0, 2)
+            .unwrap();
+        assert_eq!(data, vec![0x12, 0x34, 0x56, 0x78]);
+    }
+
+    #[test]
+    fn test_read_mem_error() {
+        // Error packet with code 0x10 (WriteFail), reused as generic command error
+        let err_packet = {
+            let mut v = Vec::new();
+            v.push(R200_FRAME_HEADER);
+            v.push(0x01);
+            v.push(0xFF);
+            let data = [0x10u8];
+            let len = data.len() as u16;
+            v.push((len >> 8) as u8);
+            v.push((len & 0xFF) as u8);
+            v.extend_from_slice(&data);
+            let sum: u16 = v[1..].iter().map(|&b| b as u16).sum();
+            v.push((sum & 0xFF) as u8);
+            v.push(R200_FRAME_END);
+            ResponseType::Raw(v)
+        };
+        let mock = MockSerialPort::new(vec![err_packet]);
+        let mut connector = Connector::new(mock);
+        let err = connector
+            .read_mem(&[0x00, 0x00, 0x00, 0x00], 0, 0, 2)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ConnectorError::CommandError(ErrorCode::WriteFail)
+        ));
+    }
+
+    #[test]
+    fn test_read_mem_truncated_response() {
+        // Response shorter than ul header promises: ul=20 but only 19 bytes total
+        let mut resp = vec![20u8];
+        resp.extend_from_slice(&[0u8; 18]);
+        let frame = make_frame(
+            0x39,
+            Some(vec![0u8; 7].into_iter().chain([0x00, 0x02]).collect()),
+            &resp,
+        );
+        let mock = MockSerialPort::new(vec![frame]);
+        let mut connector = Connector::new(mock);
+        let err = connector
+            .read_mem(&[0x00, 0x00, 0x00, 0x00], 0, 0, 2)
+            .unwrap_err();
+        assert!(
+            matches!(err, ConnectorError::InvalidResponse(_)),
+            "unexpected error: {:?}",
+            err
+        );
     }
 
     #[test]
