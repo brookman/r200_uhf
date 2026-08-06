@@ -31,11 +31,11 @@ impl<P> Connector<P> {
             ));
         }
         match data[0] {
-            0 => Ok(WorkingArea::China900Mhz),
-            1 => Ok(WorkingArea::China800Mhz),
+            1 => Ok(WorkingArea::China900Mhz),
             2 => Ok(WorkingArea::US),
             3 => Ok(WorkingArea::EU),
-            4 => Ok(WorkingArea::Korea),
+            4 => Ok(WorkingArea::China800Mhz),
+            6 => Ok(WorkingArea::Korea),
             _ => Err(ConnectorError::InvalidWorkingArea),
         }
     }

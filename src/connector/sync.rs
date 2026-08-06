@@ -388,11 +388,11 @@ where
 
     fn set_working_area(&mut self, area: WorkingArea) -> Result<(), ConnectorError> {
         let code: u8 = match area {
-            WorkingArea::China900Mhz => 0,
-            WorkingArea::China800Mhz => 1,
+            WorkingArea::China900Mhz => 1,
             WorkingArea::US => 2,
             WorkingArea::EU => 3,
-            WorkingArea::Korea => 4,
+            WorkingArea::China800Mhz => 4,
+            WorkingArea::Korea => 6,
         };
         self.send_packet(Command::SetWorkingArea(code))?;
         let p = self.single_read_from_serial()?;
@@ -408,6 +408,9 @@ where
 
     fn select_tag(&mut self, epc: &[u8]) -> Result<(), ConnectorError> {
         let mut params = Vec::new();
+        // SelParam 0x01 (target 3'b000, action 3'b000, MemBank 2'b01 = EPC),
+        // Ptr 0x00000020 (bit pointer, not word — EPC bank start), MaskLen
+        // 0x60 (6 words = 96 bits), Truncate 0x00 (disabled), then the EPC mask.
         params.push(0x01);
         params.extend_from_slice(&[0x00, 0x00, 0x00, 0x20]);
         params.push(0x60);
@@ -795,11 +798,11 @@ mod tests {
     #[test]
     fn test_get_working_area_mapping() {
         for (code, expected) in [
-            (0, WorkingArea::China900Mhz),
-            (1, WorkingArea::China800Mhz),
+            (1, WorkingArea::China900Mhz),
             (2, WorkingArea::US),
             (3, WorkingArea::EU),
-            (4, WorkingArea::Korea),
+            (4, WorkingArea::China800Mhz),
+            (6, WorkingArea::Korea),
         ] {
             let frame = make_frame(0x08, None, &[code]);
             let mock = MockSerialPort::new(vec![frame]);

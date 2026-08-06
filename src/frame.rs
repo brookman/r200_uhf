@@ -193,6 +193,7 @@ impl SerializableCommand for Command {
             ), //Command::Manufacturer
             Command::GetWorkingChannel => (vec![0xAA], vec![]),
             Command::GetWorkingArea => (vec![0x08], vec![]),
+            Command::SetWorkingArea(code) => (vec![0x07], vec![*code]),
             Command::AcquireTransmitPower => (vec![0xB7], vec![]),
             Command::SetTransmissionPower(p) => {
                 let power = (p * 100.0) as u16;
@@ -205,7 +206,6 @@ impl SerializableCommand for Command {
                 (vec![0x27], v)
             }
             Command::StopMultiplePollingInstruction => (vec![0x28], vec![]),
-            Command::SetWorkingArea(code) => (vec![0x07], vec![*code]),
             Command::SetSelect(params) => (vec![0x0C], params.to_vec()),
             Command::ReadLabel(params) => (vec![0x39], params.to_vec()),
             Command::WriteLabel(params) => (vec![0x49], params.to_vec()),
@@ -231,9 +231,9 @@ impl SerializableCommand for Command {
             ))),
             (0xAA, _) => Ok(Command::GetWorkingChannel),
             (0x08, _) => Ok(Command::GetWorkingArea),
+            (0x07, code) => Ok(Command::SetWorkingArea(code)),
             (0xB7, _) => Ok(Command::AcquireTransmitPower),
             (0x28, _) => Ok(Command::StopMultiplePollingInstruction),
-            (0x07, code) => Ok(Command::SetWorkingArea(code)),
             _ => Err(FrameError::InvalidCommand(format!(
                 "Invalid command code: {}",
                 tuple.0[0]
