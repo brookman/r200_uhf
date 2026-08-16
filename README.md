@@ -107,31 +107,37 @@ cargo run --features cli --bin r200 -- --port /dev/ttyUSB0 info
 
 ### Usage
 
-The serial port is required and given with `--port`; the baud rate defaults to
-115200 and can be set with `--baud`.
+The serial port is given with `--port` (or the `R200_PORT` environment
+variable); it must come from one of the two. The baud rate defaults to 115200
+and can be set with `--baud`.
+
+Here the port is set once via the environment, so it can be omitted from every
+command:
 
 ```sh
+export R200_PORT=/dev/ttyUSB0
+
 # Show module info and current region/power
-r200 --port /dev/ttyUSB0 info
+r200 info
 
 # Wait until a tag is detected and print it
-r200 --port /dev/ttyUSB0 poll
+r200 poll
 
 # Continuously scan for tags until Ctrl+C (no duplicates)
-r200 --port /dev/ttyUSB0 scan
+r200 scan
 
 # Read 6 words from the EPC bank (bank 1, addr 0)
-r200 --port /dev/ttyUSB0 read --bank 1 --addr 0 --length 6
+r200 read --bank 1 --addr 0 --length 6
 
 # Write a new 12-byte EPC (24 hex chars)
-r200 --port /dev/ttyUSB0 write E28069150000501D63E2784F
+r200 write E28069150000501D63E2784F
 
 # Set the RF region (china900, china800, eu, us, korea)
-r200 --port /dev/ttyUSB0 region eu
+r200 region eu
 
 # Get or set the transmit power in dBm
-r200 --port /dev/ttyUSB0 power
-r200 --port /dev/ttyUSB0 power 26.5
+r200 power
+r200 power 26.5
 ```
 
 Run `r200 --help` or `r200 <command> --help` for the full list of commands and

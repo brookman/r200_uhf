@@ -52,8 +52,8 @@ pub fn connect(
 #[derive(Parser)]
 #[command(name = "r200", about = "R200 UHF RFID reader")]
 struct Cli {
-    /// Serial port device path (required)
-    #[arg(long)]
+    /// Serial port device path. Falls back to the `R200_PORT` env var.
+    #[arg(long, env = "R200_PORT")]
     port: String,
 
     /// Serial port baud rate

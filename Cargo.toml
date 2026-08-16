@@ -16,7 +16,7 @@ futures = { version = "0.3", optional = true }
 async-stream = { version = "0.3", optional = true }
 
 # CLI-only dependencies (see the `cli` feature)
-clap = { version = "4", features = ["derive"], optional = true }
+clap = { version = "4", features = ["derive", "env"], optional = true }
 anyhow = { version = "1", optional = true }
 serialport = { version = "4.8", optional = true }
 env_logger = { version = "0.11", optional = true }
