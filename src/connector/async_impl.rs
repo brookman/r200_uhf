@@ -790,8 +790,8 @@ mod tests {
             0xE0, 0x28, 0x06, 0x91, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         ];
         let mut connector = Connector::new(mock_port_sets(vec![
-            make_rx_frame(0x0C, &[]),  // mask ack
-            make_rx_frame(0x12, &[]),  // send-select ack
+            make_rx_frame(0x0C, &[]), // mask ack
+            make_rx_frame(0x12, &[]), // send-select ack
         ]));
         connector.select_tag(&epc).await.unwrap();
     }
@@ -799,8 +799,8 @@ mod tests {
     #[tokio::test]
     async fn test_async_clear_select_success() {
         let mut connector = Connector::new(mock_port_sets(vec![
-            make_rx_frame(0x0C, &[]),  // mask ack
-            make_rx_frame(0x12, &[]),  // send-select ack
+            make_rx_frame(0x0C, &[]), // mask ack
+            make_rx_frame(0x12, &[]), // send-select ack
         ]));
         connector.clear_select().await.unwrap();
     }

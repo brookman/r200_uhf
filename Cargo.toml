@@ -1,6 +1,6 @@
 [package]
 name = "r200_uhf"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2024"
 description = "Serial protocol library for R200 UHF RFID readers: inventory, read/write, kill, lock"
 license = "MIT"

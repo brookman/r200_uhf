@@ -1189,7 +1189,9 @@ mod tests {
 
     #[test]
     fn test_select_tag_errors_on_send_select() {
-        let epc = [0xE0, 0x28, 0x06, 0x91, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let epc = [
+            0xE0, 0x28, 0x06, 0x91, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
         let mask = make_frame(0x0C, Some(select_params(&epc)), &[]);
         let mode_err = make_error_code(0x16); // AccessFail
         let mock = MockSerialPort::new(vec![mask, mode_err]);
@@ -1234,25 +1236,37 @@ mod tests {
     fn test_parser_handles_0xdd_inside_crc() {
         // Tag E28068910000000000000002 has CRC BD DD; the 0xDD in the CRC is not a
         // frame terminator. The parser must use the PL length field to find the end.
-        let epc = [0xE2, 0x80, 0x68, 0x91, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02];
+        let epc = [
+            0xE2, 0x80, 0x68, 0x91, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+        ];
         let frame = raw_tag_frame(&epc, [0xBD, 0xDD]);
         let mock = MockSerialPort::new(vec![ResponseType::Raw(frame)]);
         let mut connector = Connector::new(mock);
         let packets = connector.read_from_serial(None).unwrap().unwrap();
         assert_eq!(packets.len(), 1);
         assert!(packets[0].is_valid());
-        assert_eq!(packets[0].get_data(), vec![55, 0x30, 0x00, 0xE2, 0x80, 0x68, 0x91, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xBD, 0xDD]);
+        assert_eq!(
+            packets[0].get_data(),
+            vec![
+                55, 0x30, 0x00, 0xE2, 0x80, 0x68, 0x91, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x02, 0xBD, 0xDD
+            ]
+        );
     }
 
     #[test]
     fn test_parser_handles_multiple_frames_in_one_read() {
         // Two tag frames (one with a 0xDD-carrying CRC) concatenated in a single read.
         let f1 = raw_tag_frame(
-            &[0xE2, 0x80, 0x68, 0x91, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01],
+            &[
+                0xE2, 0x80, 0x68, 0x91, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+            ],
             [0x8D, 0xBE],
         );
         let f2 = raw_tag_frame(
-            &[0xE2, 0x80, 0x68, 0x91, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02],
+            &[
+                0xE2, 0x80, 0x68, 0x91, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+            ],
             [0xBD, 0xDD],
         );
         let mut both = f1;
@@ -1391,15 +1405,7 @@ mod tests {
         let write_ok = make_frame(0x49, Some(write_epc_params(&new)), &[]);
 
         let mock = MockSerialPort::new(vec![
-            select0,
-            mode0,
-            write_fail,
-            clear_mask,
-            clear_mode,
-            poll,
-            timeout,
-            select1,
-            mode1,
+            select0, mode0, write_fail, clear_mask, clear_mode, poll, timeout, select1, mode1,
             write_ok,
         ]);
         let mut connector = Connector::new(mock);
