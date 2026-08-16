@@ -2,11 +2,11 @@ use crate::connector::{
     Connector, ConnectorError, WorkingArea, calculate_transmit_power, clear_non_ascii, hex_lower,
     hexdump_line, parse_hex_str, strip_read_framing,
 };
-use crate::frame::{Command, ErrorCode, Frame, R200_FRAME_END, R200_FRAME_HEADER};
+use crate::frame::{Command, ErrorCode, Frame, R200_FRAME_HEADER};
 use crate::packet::Packet;
 use crate::rfid::Rfid;
 use async_trait::async_trait;
-use log::debug;
+use log::{debug, error};
 use std::io;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -191,34 +191,53 @@ where
                     rolling.extend_from_slice(&read_buf[..n]);
                     hexdump_line("[RAW] ", &rolling);
 
-                    while let Some(header_pos) =
-                        rolling.iter().position(|&x| x == R200_FRAME_HEADER)
-                    {
-                        if let Some(end_pos) = rolling.iter().position(|&x| x == R200_FRAME_END) {
-                            if end_pos > header_pos {
-                                let chunk = &rolling[header_pos..=end_pos];
-                                if chunk.len() > 4 {
-                                    let p = Packet::new(Vec::from(chunk));
-                                    if p.is_valid() {
-                                        debug!("{}", p.debug());
-                                        output.push(p);
-                                        if output.len()
-                                            >= num_expected_responses.unwrap_or(100000) as usize
-                                        {
-                                            return Ok(Some(output));
-                                        }
-                                    }
-                                }
-                                rolling.drain(..=end_pos);
-                            } else {
-                                // End before header, discard everything before header
-                                rolling.drain(..header_pos);
-                                break;
-                            }
-                        } else {
-                            // Header but no end yet
+                    // Frame format: AA TYPE CMD PL_MSB PL_LSB DATA[PL] CHECKSUM DD.
+                    // The frame end is computed from the PL length field, not by
+                    // scanning for 0xDD: 0xDD may legitimately appear inside the
+                    // data or the checksum of a valid frame.
+                    let mut consumed = 0;
+                    while consumed < rolling.len() {
+                        let Some(header_rel) = rolling[consumed..]
+                            .iter()
+                            .position(|&x| x == R200_FRAME_HEADER)
+                        else {
+                            rolling.clear();
+                            consumed = 0;
+                            break;
+                        };
+                        consumed += header_rel;
+                        // Need header (3) + length (2) before the frame length is known.
+                        if consumed + 5 > rolling.len() {
+                            rolling.drain(..consumed);
+                            consumed = 0;
                             break;
                         }
+                        let data_len = ((rolling[consumed + 3] as usize) << 8)
+                            | rolling[consumed + 4] as usize;
+                        let frame_len = 5 + data_len + 2; // header + len + data + checksum + end
+                        if consumed + frame_len > rolling.len() {
+                            // Incomplete frame: keep the remainder aligned to the header.
+                            rolling.drain(..consumed);
+                            consumed = 0;
+                            break;
+                        }
+                        let chunk = &rolling[consumed..consumed + frame_len];
+                        let p = Packet::new(Vec::from(chunk));
+
+                        if p.is_valid() {
+                            debug!("{}", p.debug());
+                            output.push(p);
+                            if output.len() >= num_expected_responses.unwrap_or(100000) as usize {
+                                return Ok(Some(output));
+                            }
+                        } else {
+                            error!("Invalid packet: {:?}", chunk);
+                        }
+                        consumed += frame_len;
+                    }
+
+                    if consumed > 0 {
+                        rolling.drain(..consumed);
                     }
 
                     if rolling.len() > 8192 {
@@ -234,6 +253,7 @@ where
                     }
                     break;
                 }
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) => return Err(ConnectorError::SerialRead(e.to_string())),
             }
         }
@@ -286,14 +306,20 @@ where
     async fn stop_multiple_polling_instructions(&mut self) -> Result<(), ConnectorError> {
         self.send_packet(Command::StopMultiplePollingInstruction)
             .await?;
-        if let Some(p) = self.single_read_from_serial().await?
-            && matches!(p.command(), Ok(Command::StopMultiplePollingInstruction))
-        {
-            return Ok(());
+        // In-flight tag notifications may still arrive alongside the 0x28
+        // acknowledgement; keep reading until the acknowledgement is seen.
+        match self.read_from_serial(None).await {
+            Ok(Some(packets))
+                if packets.iter().any(|p| {
+                    matches!(p.command(), Ok(Command::StopMultiplePollingInstruction))
+                }) =>
+            {
+                Ok(())
+            }
+            _ => Err(ConnectorError::ErrorStopMultiPolling(
+                "No stop acknowledgement from device".into(),
+            )),
         }
-        Err(ConnectorError::ErrorStopMultiPolling(
-            "Failed to stop multi polling".into(),
-        ))
     }
 
     async fn set_working_area(&mut self, area: WorkingArea) -> Result<(), ConnectorError> {
@@ -326,27 +352,23 @@ where
         params.push(0x00);
         params.extend_from_slice(epc);
         self.send_packet(Command::SetSelect(params)).await?;
-        if let Some(p) = self.single_read_from_serial().await? {
-            if p.is_error() {
-                let error_code = ErrorCode::from_byte(p.error_code_byte().unwrap_or(0xFF));
-                return Err(ConnectorError::CommandError(error_code));
-            }
-            return Ok(());
-        }
-        Err(ConnectorError::NoPacketReceived)
+        check_ack(self.single_read_from_serial().await?)?;
+        // Select mode 0x02 = send the Select command before every tag operation
+        // other than polling inventory (read, write, lock, kill). Without it the
+        // module stores the mask but never applies it to tag operations.
+        self.send_packet(Command::SetSendSelect(0x02)).await?;
+        check_ack(self.single_read_from_serial().await?)?;
+        Ok(())
     }
 
     async fn clear_select(&mut self) -> Result<(), ConnectorError> {
         let params = vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
         self.send_packet(Command::SetSelect(params)).await?;
-        if let Some(p) = self.single_read_from_serial().await? {
-            if p.is_error() {
-                let error_code = ErrorCode::from_byte(p.error_code_byte().unwrap_or(0xFF));
-                return Err(ConnectorError::CommandError(error_code));
-            }
-            return Ok(());
-        }
-        Err(ConnectorError::NoPacketReceived)
+        check_ack(self.single_read_from_serial().await?)?;
+        // Select mode 0x01 = do not send the Select command before tag operations.
+        self.send_packet(Command::SetSendSelect(0x01)).await?;
+        check_ack(self.single_read_from_serial().await?)?;
+        Ok(())
     }
 
     async fn read_mem(
@@ -483,9 +505,22 @@ where
     }
 }
 
+/// Convert a single-read result into a success/error result.
+fn check_ack(p: Option<Packet>) -> Result<(), ConnectorError> {
+    if let Some(p) = p {
+        if p.is_error() {
+            let error_code = ErrorCode::from_byte(p.error_code_byte().unwrap_or(0xFF));
+            return Err(ConnectorError::CommandError(error_code));
+        }
+        return Ok(());
+    }
+    Err(ConnectorError::NoPacketReceived)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frame::R200_FRAME_END;
     use std::collections::VecDeque;
     use std::io;
     use std::pin::Pin;
@@ -754,13 +789,19 @@ mod tests {
         let epc = [
             0xE0, 0x28, 0x06, 0x91, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         ];
-        let mut connector = Connector::new(mock_port(make_rx_frame(0x0C, &[])));
+        let mut connector = Connector::new(mock_port_sets(vec![
+            make_rx_frame(0x0C, &[]),  // mask ack
+            make_rx_frame(0x12, &[]),  // send-select ack
+        ]));
         connector.select_tag(&epc).await.unwrap();
     }
 
     #[tokio::test]
     async fn test_async_clear_select_success() {
-        let mut connector = Connector::new(mock_port(make_rx_frame(0x0C, &[])));
+        let mut connector = Connector::new(mock_port_sets(vec![
+            make_rx_frame(0x0C, &[]),  // mask ack
+            make_rx_frame(0x12, &[]),  // send-select ack
+        ]));
         connector.clear_select().await.unwrap();
     }
 
@@ -815,7 +856,8 @@ mod tests {
         let current = [0xE0, 0x28, 0x06, 0x91, 0x05, 0x00];
         let new = [0xE0, 0x28, 0x06, 0x91, 0x05, 0x01];
         let mut connector = Connector::new(mock_port_sets(vec![
-            make_rx_frame(0x0C, &[]), // select ack
+            make_rx_frame(0x0C, &[]), // select mask ack
+            make_rx_frame(0x12, &[]), // select mode ack
             make_rx_frame(0x49, &[]), // write ack
         ]));
         connector
@@ -829,16 +871,19 @@ mod tests {
         let current = [0xE0, 0x28, 0x06, 0x91, 0x05, 0x00];
         let new = [0xE0, 0x28, 0x06, 0x91, 0x05, 0x01];
         let mut connector = Connector::new(mock_port_sets(vec![
-            make_rx_frame(0x0C, &[]),     // select ack (attempt 0)
+            make_rx_frame(0x0C, &[]),     // select mask ack (attempt 0)
+            make_rx_frame(0x12, &[]),     // select mode ack (attempt 0)
             make_rx_frame(0xFF, &[0x10]), // write -> WriteFail
-            make_rx_frame(0x0C, &[]),     // clear select ack
+            make_rx_frame(0x0C, &[]),     // clear select mask ack
+            make_rx_frame(0x12, &[]),     // clear select mode ack
             make_rx_frame(
                 0x22,
                 &tag_payload(&[
                     0xE0, 0x28, 0x06, 0x91, 0x05, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                 ]),
             ), // poll
-            make_rx_frame(0x0C, &[]),     // select ack (attempt 1)
+            make_rx_frame(0x0C, &[]),     // select mask ack (attempt 1)
+            make_rx_frame(0x12, &[]),     // select mode ack (attempt 1)
             make_rx_frame(0x49, &[]),     // write ack (attempt 1)
         ]));
         connector

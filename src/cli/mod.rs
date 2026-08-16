@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use crate::connector::sync::SyncIO;
-use crate::connector::WorkingArea;
+use crate::connector::{WorkingArea, parse_hex_str};
 use display::{display_tag, hex};
 use port::{ReaderGuard, SharedPort};
 
@@ -26,11 +26,7 @@ pub fn parse_hex(s: &str) -> Result<Vec<u8>> {
     if !s.len().is_multiple_of(2) {
         anyhow::bail!("Hex string must have even length");
     }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| anyhow::anyhow!("Invalid hex string: {}", e))
+    Ok(parse_hex_str(s))
 }
 
 /// Open the serial port and return a [`Connector`](crate::connector::Connector)
@@ -201,6 +197,9 @@ pub fn run() -> Result<()> {
                     }
                 }
             }
+            // Always leave the reader out of multi-polling mode, even on Ctrl+C.
+            connector.stop_multiple_polling_instructions()?;
+            println!("Scan stopped.");
         }
 
         Commands::Write { epc, select } => {
@@ -233,7 +232,15 @@ pub fn run() -> Result<()> {
             let select_epc = select_bytes.as_ref().unwrap_or(&current_epc);
             println!("Selecting tag: {}", hex(select_epc));
             println!("Tag detected, writing...");
-            connector.write_epc_reliable(select_epc, &epc_bytes, 3)?;
+            if select_bytes.is_some() {
+                // --select gates the write: only the tag matching this EPC may be
+                // written. A WriteFail must not fall back to any other tag, so the
+                // rediscovery logic of write_epc_reliable is intentionally skipped.
+                connector.select_tag(select_epc)?;
+                connector.write_epc(&epc_bytes)?;
+            } else {
+                connector.write_epc_reliable(select_epc, &epc_bytes, 3)?;
+            }
             connector.clear_select()?;
             let tags = connector.single_polling_instruction()?;
             if let Some(tag) = tags.first() {

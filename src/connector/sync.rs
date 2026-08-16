@@ -2,7 +2,7 @@ use crate::connector::{
     Connector, ConnectorError, WorkingArea, calculate_transmit_power, clear_non_ascii, hex_lower,
     hexdump_line, parse_hex_str, strip_read_framing,
 };
-use crate::frame::{Command, ErrorCode, Frame, R200_FRAME_END, R200_FRAME_HEADER};
+use crate::frame::{Command, ErrorCode, Frame, R200_FRAME_HEADER};
 use crate::packet::Packet;
 use crate::rfid::Rfid;
 use log::{debug, error};
@@ -214,28 +214,37 @@ where
                     // print raw for debug
                     hexdump_line("[RAW] ", &rolling);
 
-                    if !rolling.contains(&R200_FRAME_HEADER) {
-                        rolling.clear();
-                        continue;
-                    }
-                    if !rolling.contains(&R200_FRAME_END) {
-                        continue;
-                    }
-
-                    let first_frame_index = rolling
-                        .iter()
-                        .position(|&x| x == R200_FRAME_HEADER)
-                        .unwrap();
-                    let last_frame_index =
-                        rolling.iter().position(|&x| x == R200_FRAME_END).unwrap();
-
-                    let chunk = &rolling[first_frame_index..last_frame_index + 1];
-
-                    if chunk.len() > 4
-                        && chunk[0] == R200_FRAME_HEADER
-                        && chunk.last() == Some(&R200_FRAME_END)
-                    {
-                        // Extract type, command, and data
+                    // Frame format: AA TYPE CMD PL_MSB PL_LSB DATA[PL] CHECKSUM DD.
+                    // The frame end is computed from the PL length field, not by
+                    // scanning for 0xDD: 0xDD may legitimately appear inside the
+                    // data or the checksum of a valid frame.
+                    let mut consumed = 0;
+                    while consumed < rolling.len() {
+                        let Some(header_rel) = rolling[consumed..]
+                            .iter()
+                            .position(|&x| x == R200_FRAME_HEADER)
+                        else {
+                            rolling.clear();
+                            consumed = 0;
+                            break;
+                        };
+                        consumed += header_rel;
+                        // Need header (3) + length (2) before the frame length is known.
+                        if consumed + 5 > rolling.len() {
+                            rolling.drain(..consumed);
+                            consumed = 0;
+                            break;
+                        }
+                        let data_len = ((rolling[consumed + 3] as usize) << 8)
+                            | rolling[consumed + 4] as usize;
+                        let frame_len = 5 + data_len + 2; // header + len + data + checksum + end
+                        if consumed + frame_len > rolling.len() {
+                            // Incomplete frame: keep the remainder aligned to the header.
+                            rolling.drain(..consumed);
+                            consumed = 0;
+                            break;
+                        }
+                        let chunk = &rolling[consumed..consumed + frame_len];
                         let p = Packet::new(Vec::from(chunk));
 
                         if p.is_valid() {
@@ -247,9 +256,12 @@ where
                         } else {
                             error!("Invalid packet: {:?}", chunk);
                         }
+                        consumed += frame_len;
                     }
 
-                    rolling.drain(..last_frame_index + 1);
+                    if consumed > 0 {
+                        rolling.drain(..consumed);
+                    }
 
                     if rolling.len() > 8192 {
                         rolling.drain(..rolling.len() - 4096);
@@ -265,6 +277,11 @@ where
                         return Err(ConnectorError::Timeout);
                     }
                     break;
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {
+                    // A caught signal (e.g. Ctrl+C) interrupted the blocking read;
+                    // retry instead of failing.
+                    continue;
                 }
                 Err(ref e) => {
                     error!("Serial read error: {}", e);
@@ -372,18 +389,20 @@ where
     // Stop Multi: AA 00 28 00 00 28 DD
     fn stop_multiple_polling_instructions(&mut self) -> Result<(), ConnectorError> {
         self.send_packet(Command::StopMultiplePollingInstruction)?;
-        if let Some(p) = self.single_read_from_serial()? {
-            if matches!(p.command(), Ok(Command::StopMultiplePollingInstruction)) {
-                return Ok(());
-            } else {
-                return Err(ConnectorError::ErrorStopMultiPolling(
-                    "Wrong response from device".into(),
-                ));
+        // In-flight tag notifications may still arrive alongside the 0x28
+        // acknowledgement; keep reading until the acknowledgement is seen.
+        match self.read_from_serial(None) {
+            Ok(Some(packets))
+                if packets.iter().any(|p| {
+                    matches!(p.command(), Ok(Command::StopMultiplePollingInstruction))
+                }) =>
+            {
+                Ok(())
             }
+            _ => Err(ConnectorError::ErrorStopMultiPolling(
+                "No stop acknowledgement from device".into(),
+            )),
         }
-        Err(ConnectorError::ErrorStopMultiPolling(
-            "Generic comunication error".into(),
-        ))
     }
 
     fn set_working_area(&mut self, area: WorkingArea) -> Result<(), ConnectorError> {
@@ -417,29 +436,23 @@ where
         params.push(0x00);
         params.extend_from_slice(epc);
         self.send_packet(Command::SetSelect(params))?;
-        let p = self.single_read_from_serial()?;
-        if let Some(p) = p {
-            if p.is_error() {
-                let error_code = ErrorCode::from_byte(p.error_code_byte().unwrap_or(0xFF));
-                return Err(ConnectorError::CommandError(error_code));
-            }
-            return Ok(());
-        }
-        Err(ConnectorError::NoPacketReceived)
+        check_ack(self.single_read_from_serial()?)?;
+        // Select mode 0x02 = send the Select command before every tag operation
+        // other than polling inventory (read, write, lock, kill). Without it the
+        // module stores the mask but never applies it to tag operations.
+        self.send_packet(Command::SetSendSelect(0x02))?;
+        check_ack(self.single_read_from_serial()?)?;
+        Ok(())
     }
 
     fn clear_select(&mut self) -> Result<(), ConnectorError> {
         let params = vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
         self.send_packet(Command::SetSelect(params))?;
-        let p = self.single_read_from_serial()?;
-        if let Some(p) = p {
-            if p.is_error() {
-                let error_code = ErrorCode::from_byte(p.error_code_byte().unwrap_or(0xFF));
-                return Err(ConnectorError::CommandError(error_code));
-            }
-            return Ok(());
-        }
-        Err(ConnectorError::NoPacketReceived)
+        check_ack(self.single_read_from_serial()?)?;
+        // Select mode 0x01 = do not send the Select command before tag operations.
+        self.send_packet(Command::SetSendSelect(0x01))?;
+        check_ack(self.single_read_from_serial()?)?;
+        Ok(())
     }
 
     fn read_mem(
@@ -582,9 +595,22 @@ where
     }
 }
 
+/// Convert a single-read result into a success/error result.
+fn check_ack(p: Option<Packet>) -> Result<(), ConnectorError> {
+    if let Some(p) = p {
+        if p.is_error() {
+            let error_code = ErrorCode::from_byte(p.error_code_byte().unwrap_or(0xFF));
+            return Err(ConnectorError::CommandError(error_code));
+        }
+        return Ok(());
+    }
+    Err(ConnectorError::NoPacketReceived)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frame::R200_FRAME_END;
     use std::io::{Read, Write};
     use std::sync::{Arc, Mutex};
 
@@ -1154,18 +1180,88 @@ mod tests {
         let epc = [
             0xE0, 0x28, 0x06, 0x91, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         ];
-        let frame = make_frame(0x0C, Some(select_params(&epc)), &[]);
-        let mock = MockSerialPort::new(vec![frame]);
+        let mask = make_frame(0x0C, Some(select_params(&epc)), &[]);
+        let mode = make_frame(0x12, Some(vec![0x02]), &[]);
+        let mock = MockSerialPort::new(vec![mask, mode]);
         let mut connector = Connector::new(mock);
         connector.select_tag(&epc).unwrap();
     }
 
     #[test]
+    fn test_select_tag_errors_on_send_select() {
+        let epc = [0xE0, 0x28, 0x06, 0x91, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let mask = make_frame(0x0C, Some(select_params(&epc)), &[]);
+        let mode_err = make_error_code(0x16); // AccessFail
+        let mock = MockSerialPort::new(vec![mask, mode_err]);
+        let mut connector = Connector::new(mock);
+        let err = connector.select_tag(&epc).unwrap_err();
+        assert!(matches!(
+            err,
+            ConnectorError::CommandError(ErrorCode::AccessFail)
+        ));
+    }
+
+    #[test]
     fn test_clear_select_success() {
-        let frame = make_frame(0x0C, Some(vec![0u8; 8]), &[]);
-        let mock = MockSerialPort::new(vec![frame]);
+        let mask = make_frame(0x0C, Some(vec![0u8; 8]), &[]);
+        let mode = make_frame(0x12, Some(vec![0x01]), &[]);
+        let mock = MockSerialPort::new(vec![mask, mode]);
         let mut connector = Connector::new(mock);
         connector.clear_select().unwrap();
+    }
+
+    // Build a raw tag frame (RSSI + PC + EPC + CRC) as delivered by a poll.
+    fn raw_tag_frame(epc: &[u8], crc: [u8; 2]) -> Vec<u8> {
+        assert_eq!(epc.len(), 12);
+        let mut v = Vec::new();
+        v.push(R200_FRAME_HEADER);
+        v.push(0x01);
+        v.push(0x22); // Single Polling response
+        let mut data = vec![55, 0x30, 0x00];
+        data.extend_from_slice(epc);
+        data.extend_from_slice(&crc);
+        let len = data.len() as u16;
+        v.push((len >> 8) as u8);
+        v.push((len & 0xFF) as u8);
+        v.extend_from_slice(&data);
+        let sum: u16 = v[1..].iter().map(|&b| b as u16).sum();
+        v.push((sum & 0xFF) as u8);
+        v.push(R200_FRAME_END);
+        v
+    }
+
+    #[test]
+    fn test_parser_handles_0xdd_inside_crc() {
+        // Tag E28068910000000000000002 has CRC BD DD; the 0xDD in the CRC is not a
+        // frame terminator. The parser must use the PL length field to find the end.
+        let epc = [0xE2, 0x80, 0x68, 0x91, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02];
+        let frame = raw_tag_frame(&epc, [0xBD, 0xDD]);
+        let mock = MockSerialPort::new(vec![ResponseType::Raw(frame)]);
+        let mut connector = Connector::new(mock);
+        let packets = connector.read_from_serial(None).unwrap().unwrap();
+        assert_eq!(packets.len(), 1);
+        assert!(packets[0].is_valid());
+        assert_eq!(packets[0].get_data(), vec![55, 0x30, 0x00, 0xE2, 0x80, 0x68, 0x91, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xBD, 0xDD]);
+    }
+
+    #[test]
+    fn test_parser_handles_multiple_frames_in_one_read() {
+        // Two tag frames (one with a 0xDD-carrying CRC) concatenated in a single read.
+        let f1 = raw_tag_frame(
+            &[0xE2, 0x80, 0x68, 0x91, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01],
+            [0x8D, 0xBE],
+        );
+        let f2 = raw_tag_frame(
+            &[0xE2, 0x80, 0x68, 0x91, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02],
+            [0xBD, 0xDD],
+        );
+        let mut both = f1;
+        both.extend_from_slice(&f2);
+        let mock = MockSerialPort::new(vec![ResponseType::Raw(both)]);
+        let mut connector = Connector::new(mock);
+        let packets = connector.read_from_serial(Some(2)).unwrap().unwrap();
+        assert_eq!(packets.len(), 2);
+        assert!(packets.iter().all(|p| p.is_valid()));
     }
 
     #[test]
@@ -1196,8 +1292,8 @@ mod tests {
         let epc2 = [
             0xE0, 0x28, 0x06, 0x91, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
         ];
-        let tag1 = tag_frame(0x27, Some(vec![0x00, 0x64]), &epc1);
-        let tag2 = tag_frame(0x27, Some(vec![0x00, 0x64]), &epc2);
+        let tag1 = tag_frame(0x27, Some(vec![0x22, 0x00, 0x64]), &epc1);
+        let tag2 = tag_frame(0x27, Some(vec![0x22, 0x00, 0x64]), &epc2);
         let timeout = make_error_frame(io::Error::new(io::ErrorKind::TimedOut, "done"));
         let mock = MockSerialPort::new(vec![tag1, tag2, timeout]);
         let mut connector = Connector::new(mock);
@@ -1262,8 +1358,9 @@ mod tests {
         let current = [0xE0, 0x28, 0x06, 0x91, 0x05, 0x00];
         let new = [0xE0, 0x28, 0x06, 0x91, 0x05, 0x01];
         let select = make_frame(0x0C, Some(select_params(&current)), &[]);
+        let mode = make_frame(0x12, Some(vec![0x02]), &[]);
         let write = make_frame(0x49, Some(write_epc_params(&new)), &[]);
-        let mock = MockSerialPort::new(vec![select, write]);
+        let mock = MockSerialPort::new(vec![select, mode, write]);
         let mut connector = Connector::new(mock);
         connector.write_epc_reliable(&current, &new, 1).unwrap();
     }
@@ -1279,19 +1376,31 @@ mod tests {
 
         // attempt 0: select ok, then write -> WriteFail (0x10)
         let select0 = make_frame(0x0C, Some(select_params(&current)), &[]);
+        let mode0 = make_frame(0x12, Some(vec![0x02]), &[]);
         let write_fail = make_error_code(0x10);
 
         // rediscovery: clear select ok, poll returns the new EPC, then timeout
-        let clear = make_frame(0x0C, Some(vec![0u8; 8]), &[]);
+        let clear_mask = make_frame(0x0C, Some(vec![0u8; 8]), &[]);
+        let clear_mode = make_frame(0x12, Some(vec![0x01]), &[]);
         let poll = tag_frame(0x22, None, &rediscovered);
         let timeout = make_error_frame(io::Error::new(io::ErrorKind::TimedOut, "done"));
 
         // attempt 1: select with rediscovered EPC, write ok
         let select1 = make_frame(0x0C, Some(select_params(&rediscovered)), &[]);
+        let mode1 = make_frame(0x12, Some(vec![0x02]), &[]);
         let write_ok = make_frame(0x49, Some(write_epc_params(&new)), &[]);
 
         let mock = MockSerialPort::new(vec![
-            select0, write_fail, clear, poll, timeout, select1, write_ok,
+            select0,
+            mode0,
+            write_fail,
+            clear_mask,
+            clear_mode,
+            poll,
+            timeout,
+            select1,
+            mode1,
+            write_ok,
         ]);
         let mut connector = Connector::new(mock);
         connector.write_epc_reliable(&current, &new, 1).unwrap();
@@ -1303,6 +1412,7 @@ mod tests {
         let new = [0xE0, 0x28, 0x06, 0x91, 0x05, 0x01];
         let mock = MockSerialPort::new(vec![
             make_frame(0x0C, Some(select_params(&current)), &[]),
+            make_frame(0x12, Some(vec![0x02]), &[]),
             make_error_code(0x10),
         ]);
         let mut connector = Connector::new(mock);

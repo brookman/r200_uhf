@@ -39,6 +39,7 @@ pub enum Command {
     MultiplePollingInstruction(u16),
     StopMultiplePollingInstruction,
     SetSelect(Vec<u8>),
+    SetSendSelect(u8),
     ReadLabel(Vec<u8>),
     WriteLabel(Vec<u8>),
     KillTag(Vec<u8>),
@@ -154,6 +155,7 @@ impl Display for Command {
             }
             Command::SetWorkingArea(code) => write!(f, "Set Working Area to {}", code),
             Command::SetSelect(params) => write!(f, "Set Select ({} bytes)", params.len()),
+            Command::SetSendSelect(mode) => write!(f, "Set Send Select mode to {}", mode),
             Command::ReadLabel(params) => write!(f, "Read Label ({} bytes)", params.len()),
             Command::WriteLabel(params) => write!(f, "Write Label ({} bytes)", params.len()),
             Command::KillTag(params) => write!(f, "Kill Tag ({} bytes)", params.len()),
@@ -202,11 +204,13 @@ impl SerializableCommand for Command {
             }
             Command::SinglePollingInstruction => (vec![0x22], vec![]),
             Command::MultiplePollingInstruction(max) => {
-                let v = vec![(max >> 8) as u8, (max & 0xFF) as u8];
+                // 0x27 params: Reserved 0x22, then polling count CNT (2 bytes, MSB first).
+                let v = vec![0x22, (max >> 8) as u8, (max & 0xFF) as u8];
                 (vec![0x27], v)
             }
             Command::StopMultiplePollingInstruction => (vec![0x28], vec![]),
             Command::SetSelect(params) => (vec![0x0C], params.to_vec()),
+            Command::SetSendSelect(mode) => (vec![0x12], vec![*mode]),
             Command::ReadLabel(params) => (vec![0x39], params.to_vec()),
             Command::WriteLabel(params) => (vec![0x49], params.to_vec()),
             Command::KillTag(params) => (vec![0x65], params.to_vec()),
@@ -234,6 +238,7 @@ impl SerializableCommand for Command {
             (0x07, code) => Ok(Command::SetWorkingArea(code)),
             (0xB7, _) => Ok(Command::AcquireTransmitPower),
             (0x28, _) => Ok(Command::StopMultiplePollingInstruction),
+            (0x12, mode) => Ok(Command::SetSendSelect(mode)),
             _ => Err(FrameError::InvalidCommand(format!(
                 "Invalid command code: {}",
                 tuple.0[0]
@@ -380,6 +385,22 @@ mod tests {
     }
 
     #[test]
+    fn set_send_select_frame_bytes() {
+        // Select mode 0x02: send Select before read/write/lock/kill.
+        let bytes = frame_bytes(Command::SetSendSelect(0x02));
+        let expected = vec![0xAA, 0x00, 0x12, 0x00, 0x01, 0x02, 0x15, 0xDD];
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn command_parses_set_send_select() {
+        assert!(matches!(
+            Command::from_tuple((vec![0x12], vec![0x02])).unwrap(),
+            Command::SetSendSelect(0x02)
+        ));
+    }
+
+    #[test]
     fn read_label_frame_bytes() {
         // Read bank 1 (EPC), addr 2, 6 words with zero access password
         let params = vec![0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x02, 0x00, 0x06];
@@ -408,7 +429,7 @@ mod tests {
     #[test]
     fn multiple_polling_instruction_frame_bytes() {
         let bytes = frame_bytes(Command::MultiplePollingInstruction(100));
-        let expected = vec![0xAA, 0x00, 0x27, 0x00, 0x02, 0x00, 0x64, 0x8D, 0xDD];
+        let expected = vec![0xAA, 0x00, 0x27, 0x00, 0x03, 0x22, 0x00, 0x64, 0xB0, 0xDD];
         assert_eq!(bytes, expected);
     }
 
