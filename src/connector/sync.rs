@@ -748,12 +748,12 @@ mod tests {
                     if let Some(last_write) = writes.last() {
                         let request_command = last_write[2];
 
-                        // check del parametro
+                        // Check the parameter.
                         let parameter_is_valid: bool;
 
                         if let Some(p) = n.request.1 {
-                            // controllo che sia impostato il valore 1 di lunghezza parametri (posizione 4) e
-                            // che il parametro sia impostato corettamente (posizione 5)
+                            // Check that the parameter length is set to 1 (position 4) and
+                            // that the parameter is set correctly (position 5).
                             let params = &last_write[5..5 + p.len()];
                             parameter_is_valid = last_write[4] == (p.len() as u8) && p == params;
                         } else {
@@ -776,8 +776,8 @@ mod tests {
                             ))
                         }
                     } else {
-                        // nel caso non abbiamo ricevuto nessuno comando di scrittura vuol dire
-                        // che stiamo semplicemente leggendo una sequenza di frame
+                        // If no write command was received, we are simply
+                        // reading a sequence of frames.
                         let bytes = n.responses.unwrap();
                         let n = bytes.len().min(buf.len());
                         buf[..n].copy_from_slice(&bytes[..n]);

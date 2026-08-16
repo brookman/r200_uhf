@@ -58,7 +58,7 @@ impl Packet {
 
     pub(crate) fn debug(&self) -> String {
         format!(
-            "Tipo: {:02X}, Comando: {:02X}, Lunghezza: {} - Dato: {:?}",
+            "Type: {:02X}, Command: {:02X}, Length: {} - Data: {:?}",
             self.frame_type(),
             self.command_code(),
             self.data_len(),
@@ -116,9 +116,9 @@ mod tests {
         assert_eq!(p.get_data(), vec![0x00]);
         // debug string should contain hex codes and length
         let dbg = p.debug();
-        assert!(dbg.contains("Tipo: 00"));
-        assert!(dbg.contains("Comando: 03"));
-        assert!(dbg.contains("Lunghezza: 1"));
+        assert!(dbg.contains("Type: 00"));
+        assert!(dbg.contains("Command: 03"));
+        assert!(dbg.contains("Length: 1"));
     }
 
     #[test]

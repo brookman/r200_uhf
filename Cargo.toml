@@ -25,7 +25,7 @@ ctrlc = { version = "3", optional = true }
 
 [features]
 default = []
-# Abilita la serializzazione/deserializzazione Serde delle strutture quando richiesto
+# Enable Serde serialization/deserialization for the structures when requested
 serde = ["dep:serde"]
 async = ["async-trait", "tokio", "futures", "async-stream"]
 # CLI: enables the interactive `r200` binary (see [[bin]] below)
@@ -36,9 +36,9 @@ cli = ["dep:clap", "dep:anyhow", "dep:serialport", "dep:env_logger", "dep:gs1", 
 serialport = "4.8"
 env_logger = "0.11"
 tokio-serial = "5.4.5"
-## Tokio serve per compilare/girare gli esempi async che usano #[tokio::main]
-## Qui abilitiamo le feature necessarie al runtime e alle macro, senza
-## richiedere l'attivazione della feature opzionale della libreria.
+## Tokio is needed to compile/run the async examples that use #[tokio::main]
+## Enable the features required by the runtime and macros without requiring
+## activation of the library's optional feature.
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "time"] }
 
 [[example]]
@@ -49,4 +49,3 @@ required-features = ["async"]
 name = "r200"
 path = "src/main.rs"
 required-features = ["cli"]
-

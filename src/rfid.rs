@@ -65,7 +65,7 @@ impl Rfid {
 }
 
 fn bytes_to_hex_upper(bytes: &[u8]) -> String {
-    // usa formatting manuale per performance / controllo
+    // Use manual formatting for performance / control.
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
         s.push_str(&format!("{:02X}", b));
