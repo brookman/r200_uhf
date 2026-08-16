@@ -2,7 +2,7 @@
 name = "r200_uhf"
 version = "0.5.1"
 edition = "2024"
-description = "Implementation of serial protocol for reading R200 UHF chip"
+description = "Serial protocol library for R200 UHF RFID readers: inventory, read/write, kill, lock"
 license = "MIT"
 repository = "https://github.com/oniram88/r200_uhf"
 
@@ -15,11 +15,21 @@ tokio = { version = "1", features = ["io-util", "time"], optional = true }
 futures = { version = "0.3", optional = true }
 async-stream = { version = "0.3", optional = true }
 
+# CLI-only dependencies (see the `cli` feature)
+clap = { version = "4", features = ["derive", "env"], optional = true }
+anyhow = { version = "1", optional = true }
+serialport = { version = "4.8", optional = true }
+env_logger = { version = "0.11", optional = true }
+gs1 = { version = "0.1", optional = true }
+ctrlc = { version = "3", optional = true }
+
 [features]
 default = []
 # Abilita la serializzazione/deserializzazione Serde delle strutture quando richiesto
 serde = ["dep:serde"]
 async = ["async-trait", "tokio", "futures", "async-stream"]
+# CLI: enables the interactive `r200` binary (see [[bin]] below)
+cli = ["dep:clap", "dep:anyhow", "dep:serialport", "dep:env_logger", "dep:gs1", "dep:ctrlc"]
 
 
 [dev-dependencies]
@@ -29,5 +39,14 @@ tokio-serial = "5.4.5"
 ## Tokio serve per compilare/girare gli esempi async che usano #[tokio::main]
 ## Qui abilitiamo le feature necessarie al runtime e alle macro, senza
 ## richiedere l'attivazione della feature opzionale della libreria.
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "time"] }
+
+[[example]]
+name = "async_std_pc_serial"
+required-features = ["async"]
+
+[[bin]]
+name = "r200"
+path = "src/main.rs"
+required-features = ["cli"]
 

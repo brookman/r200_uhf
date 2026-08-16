@@ -2,6 +2,7 @@ use crate::frame::SerializableCommand;
 use crate::frame::{Command, FrameError};
 use std::fmt::Display;
 
+/// A raw frame received from the reader, with helpers to decode its fields.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Packet {
     raw_data: Vec<u8>,
@@ -24,6 +25,20 @@ impl Packet {
     pub(crate) fn get_data(&self) -> Vec<u8> {
         let data = &self.raw_data[5..(5 + self.data_len() as usize)];
         data.to_vec()
+    }
+
+    /// Returns true if this packet is an error response (command code 0xFF).
+    pub fn is_error(&self) -> bool {
+        self.command_code() == 0xFF
+    }
+
+    /// If this is an error packet, returns the M100 error code byte.
+    pub fn error_code_byte(&self) -> Option<u8> {
+        if self.is_error() {
+            self.get_data().first().copied()
+        } else {
+            None
+        }
     }
 
     /// Check if packet is valid
@@ -59,7 +74,7 @@ impl Packet {
 impl Display for Packet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let out = {
-            if let Ok(text) = std::str::from_utf8(&*self.get_data()) {
+            if let Ok(text) = std::str::from_utf8(&self.get_data()) {
                 text.to_string()
             } else {
                 "Invalid UTF-8".to_string()
@@ -76,12 +91,13 @@ mod tests {
     // Helper to build a raw packet vector: [HEADER, TYPE, CMD, LEN_HI, LEN_LO, DATA..., CHECKSUM, END]
     fn build_packet(frame_type: u8, cmd: u8, data: &[u8]) -> Vec<u8> {
         let len = data.len() as u16;
-        let mut v = Vec::new();
-        v.push(crate::frame::R200_FRAME_HEADER);
-        v.push(frame_type);
-        v.push(cmd);
-        v.push((len >> 8) as u8);
-        v.push((len & 0xFF) as u8);
+        let mut v = vec![
+            crate::frame::R200_FRAME_HEADER,
+            frame_type,
+            cmd,
+            (len >> 8) as u8,
+            (len & 0xFF) as u8,
+        ];
         v.extend_from_slice(data);
         // checksum is sum of bytes from index 1 (type) to last data byte, low 8 bits
         let sum: u16 = v[1..].iter().map(|&b| b as u16).sum();
@@ -153,5 +169,27 @@ mod tests {
         incorrect_bytes[4] = 0x10;
         let p = Packet::new(incorrect_bytes);
         assert!(!p.is_valid());
+    }
+
+    #[test]
+    fn error_packet_detection() {
+        let err = Packet::new(build_packet(0x00, 0xFF, &[0x10])); // WriteFail
+        assert!(err.is_error());
+        assert_eq!(err.error_code_byte(), Some(0x10));
+
+        let ok = Packet::new(build_packet(0x00, 0x22, &[])); // normal response
+        assert!(!ok.is_error());
+        assert_eq!(ok.error_code_byte(), None);
+
+        // Empty error data: no code byte to extract
+        let empty = Packet::new(build_packet(0x00, 0xFF, &[]));
+        assert!(empty.is_error());
+        assert_eq!(empty.error_code_byte(), None);
+    }
+
+    #[test]
+    fn command_mapping_set_working_area() {
+        let p = Packet::new(build_packet(0x00, 0x07, &[0x03])); // EU = 3
+        assert!(matches!(p.command().unwrap(), Command::SetWorkingArea(3)));
     }
 }

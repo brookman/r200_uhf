@@ -7,6 +7,7 @@ mod async_impl;
 pub use async_impl::*;
 
 use crate::Rfid;
+use crate::frame::ErrorCode;
 use crate::packet::Packet;
 use log::{debug, error, info};
 use std::fmt;
@@ -17,7 +18,7 @@ pub struct Connector<P> {
 }
 
 impl<P> Connector<P> {
-    /// Create a new Connector from an already opened SerialPort.
+    /// Create a new Connector wrapping an open serial port.
     pub fn new(port: P) -> Self {
         Connector { port }
     }
@@ -30,11 +31,11 @@ impl<P> Connector<P> {
             ));
         }
         match data[0] {
-            0 => Ok(WorkingArea::China900Mhz),
-            1 => Ok(WorkingArea::China800Mhz),
+            1 => Ok(WorkingArea::China900Mhz),
             2 => Ok(WorkingArea::US),
             3 => Ok(WorkingArea::EU),
-            4 => Ok(WorkingArea::Korea),
+            4 => Ok(WorkingArea::China800Mhz),
+            6 => Ok(WorkingArea::Korea),
             _ => Err(ConnectorError::InvalidWorkingArea),
         }
     }
@@ -84,6 +85,7 @@ impl<P> Connector<P> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+/// Regulatory working area (RF band) configured on the reader.
 pub enum WorkingArea {
     China900Mhz,
     China800Mhz,
@@ -93,31 +95,43 @@ pub enum WorkingArea {
 }
 
 impl WorkingArea {
+    /// Convert a channel-index response packet into a frequency in MHz for this area.
     pub fn packet_to_64(&self, p: Packet) -> f64 {
         let data = p.get_data();
         if data.is_empty() {
             return 0.0;
         }
         match self {
-            WorkingArea::China900Mhz => return (data[0] as f64) * 0.25 + 920.125,
-            WorkingArea::China800Mhz => return (data[0] as f64) * 0.25 + 840.125,
-            WorkingArea::US => return (data[0] as f64) * 0.50 + 902.25,
-            WorkingArea::EU => return (data[0] as f64) * 0.2 + 865.1,
-            WorkingArea::Korea => return (data[0] as f64) * 0.2 + 917.1,
+            WorkingArea::China900Mhz => (data[0] as f64) * 0.25 + 920.125,
+            WorkingArea::China800Mhz => (data[0] as f64) * 0.25 + 840.125,
+            WorkingArea::US => (data[0] as f64) * 0.50 + 902.25,
+            WorkingArea::EU => (data[0] as f64) * 0.2 + 865.1,
+            WorkingArea::Korea => (data[0] as f64) * 0.2 + 917.1,
         }
     }
 }
 
+/// Errors produced by the R200 protocol layer.
 #[derive(Debug)]
 pub enum ConnectorError {
+    /// Underlying serial I/O failure.
     Io(io::Error),
+    /// Serial timeout while waiting for a response.
     Timeout,
+    /// Reader reported an unknown working area code.
     InvalidWorkingArea,
+    /// No response packet was received.
     NoPacketReceived,
+    /// A setting could not be applied.
     FailedSetting(String),
+    /// A response had an unexpected shape or contents.
     InvalidResponse(String),
+    /// A serial read failed unexpectedly.
     SerialRead(String),
+    /// Stopping multiple polling failed.
     ErrorStopMultiPolling(String),
+    /// The reader returned a protocol error code.
+    CommandError(ErrorCode),
 }
 
 impl fmt::Display for ConnectorError {
@@ -133,6 +147,7 @@ impl fmt::Display for ConnectorError {
             ConnectorError::ErrorStopMultiPolling(msg) => {
                 write!(f, "Impossible to stop multiple polling [{msg}]")
             }
+            ConnectorError::CommandError(code) => write!(f, "Command error: {}", code),
         }
     }
 }
@@ -145,6 +160,27 @@ impl From<io::Error> for ConnectorError {
     }
 }
 
+/// Strip the RSSI/PC/EPC framing from a ReadData response.
+///
+/// The response payload is laid out as:
+/// - `[0]` = `ul`, the byte length of the PC + EPC section
+/// - `[1..1+ul]` = PC (2 bytes) + EPC (`ul - 2` bytes)
+/// - `[1+ul..]` = the requested memory words
+pub(crate) fn strip_read_framing(data: &[u8]) -> Result<Vec<u8>, ConnectorError> {
+    let Some(&ul) = data.first() else {
+        return Err(ConnectorError::InvalidResponse(
+            "Empty read data response".into(),
+        ));
+    };
+    let ul = ul as usize;
+    if data.len() < 1 + ul {
+        return Err(ConnectorError::InvalidResponse(
+            "Truncated read data response".into(),
+        ));
+    }
+    Ok(data[1 + ul..].to_vec())
+}
+
 pub(crate) fn clear_non_ascii(s: &str) -> String {
     s.chars().filter(|c| c.is_ascii()).collect()
 }
@@ -155,6 +191,17 @@ pub(crate) fn hexdump_line(prefix: &str, data: &[u8]) {
         out.push_str(format!("{:02X} ", b).as_str());
     }
     log::debug!("{} {}", prefix, out);
+}
+
+pub(crate) fn parse_hex_str(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap_or(0))
+        .collect()
+}
+
+pub(crate) fn hex_lower(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 pub(crate) fn calculate_transmit_power(p: Packet) -> Result<f64, ConnectorError> {
