@@ -24,6 +24,10 @@
 //! ```
 
 pub mod connector;
+
+#[cfg(feature = "cli")]
+pub mod cli;
+
 mod frame;
 mod packet;
 mod rfid;

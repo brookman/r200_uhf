@@ -78,6 +78,65 @@ For non-blocking I/O enable the `async` feature:
 r200_uhf = { version = "0.5", features = ["async"] }
 ```
 
+## CLI (`r200`)
+
+This crate ships an optional command-line interface, exposed as a `r200` binary.
+It is gated behind the `cli` cargo feature (off by default) and talks to the
+reader using the blocking `SyncIO` API.
+
+### Install
+
+Install the latest published release of the `r200` binary from crates.io:
+
+```sh
+cargo install r200_uhf --features cli
+```
+
+Or build and install it from this repository:
+
+```sh
+cargo install --path . --features cli
+```
+
+Either way, `r200` ends up in `~/.cargo/bin`. Alternatively, run it directly
+without installing:
+
+```sh
+cargo run --features cli --bin r200 -- --port /dev/ttyUSB0 info
+```
+
+### Usage
+
+The serial port is required and given with `--port`; the baud rate defaults to
+115200 and can be set with `--baud`.
+
+```sh
+# Show module info and current region/power
+r200 --port /dev/ttyUSB0 info
+
+# Wait until a tag is detected and print it
+r200 --port /dev/ttyUSB0 poll
+
+# Continuously scan for tags until Ctrl+C (no duplicates)
+r200 --port /dev/ttyUSB0 scan
+
+# Read 6 words from the EPC bank (bank 1, addr 0)
+r200 --port /dev/ttyUSB0 read --bank 1 --addr 0 --length 6
+
+# Write a new 12-byte EPC (24 hex chars)
+r200 --port /dev/ttyUSB0 write E28069150000501D63E2784F
+
+# Set the RF region (china900, china800, eu, us, korea)
+r200 --port /dev/ttyUSB0 region eu
+
+# Get or set the transmit power in dBm
+r200 --port /dev/ttyUSB0 power
+r200 --port /dev/ttyUSB0 power 26.5
+```
+
+Run `r200 --help` or `r200 <command> --help` for the full list of commands and
+options.
+
 Legal and safety note
 - Transmission power and permitted frequencies vary by country/region. Ensure compliance with your local regulations. The example sets or checks transmission power; adjust it responsibly.
 
