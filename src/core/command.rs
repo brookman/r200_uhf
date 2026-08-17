@@ -114,8 +114,38 @@ impl Command for StopMultiplePolling {
 
 // ── Select ──────────────────────────────────────────
 
+/// `Select` command parameters (spec §5, command 0x0C).
+///
+/// The payload is `SelParam(1)`, `Ptr(4)` (a bit offset), `MaskLen(1)` (a bit
+/// length), `Truncate(1)`, then `Mask(N)`. `SelParam` packs Target (3 bits),
+/// Action (3 bits) and `MemBank` (2 bits) into a single byte.
 pub struct SetSelect {
+    /// Target (3 bits), Action (3 bits) and memory bank (2 bits), pre-packed.
+    pub sel_param: u8,
+    /// Mask start offset within the bank, in **bits**.
+    pub ptr: u32,
+    /// Truncate flag: `0x00` disables, `0x80` enables truncation.
+    pub truncate: u8,
+    /// The mask bytes to match against.
     pub mask: Vec<u8>,
+}
+
+impl SetSelect {
+    /// Build a `Select` that matches a full EPC.
+    ///
+    /// Uses Target/Action `0`, the EPC bank, and a bit pointer of `0x20` (32),
+    /// which is where the EPC bytes begin in the EPC memory bank (after the
+    /// 16-bit CRC and 16-bit PC words).
+    #[must_use]
+    pub fn by_epc(epc: &[u8]) -> Self {
+        // SelParam: Target(000) Action(000) MemBank(01 = EPC) => 0x01.
+        Self {
+            sel_param: 0x01,
+            ptr: 0x20,
+            truncate: 0x00,
+            mask: epc.to_vec(),
+        }
+    }
 }
 
 impl Command for SetSelect {
@@ -123,7 +153,18 @@ impl Command for SetSelect {
     const CODE: u8 = 0x0C;
 
     fn encode(&self) -> Vec<u8> {
-        self.mask.clone()
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "mask bit length fits in u8 (max 255 bits per spec)"
+        )]
+        let mask_len_bits = (self.mask.len() * 8) as u8;
+        let mut buf = Vec::with_capacity(7 + self.mask.len());
+        buf.push(self.sel_param);
+        buf.extend_from_slice(&self.ptr.to_be_bytes());
+        buf.push(mask_len_bits);
+        buf.push(self.truncate);
+        buf.extend_from_slice(&self.mask);
+        buf
     }
 
     fn decode_response(&self, _data: &[u8]) -> Result<(), CommandError> {
@@ -445,10 +486,20 @@ mod tests {
 
     #[test]
     fn set_select_encode() {
-        let cmd = SetSelect {
-            mask: vec![0xE2, 0x00, 0x10],
-        };
-        assert_eq!(cmd.encode(), vec![0xE2, 0x00, 0x10]);
+        // Spec §5 example: SelParam=0x01, Ptr=0x00000020, MaskLen=0x18 (3
+        // bytes = 24 bits), Truncate=0x00, then the mask bytes.
+        let cmd = SetSelect::by_epc(&[0xE2, 0x00, 0x10]);
+        assert_eq!(
+            cmd.encode(),
+            vec![0x01, 0x00, 0x00, 0x00, 0x20, 0x18, 0x00, 0xE2, 0x00, 0x10]
+        );
+    }
+
+    #[test]
+    fn set_select_mask_len_is_bits() {
+        // 12-byte EPC => 96 bits => 0x60.
+        let cmd = SetSelect::by_epc(&[0xAB; 12]);
+        assert_eq!(cmd.encode()[5], 0x60);
     }
 
     #[test]

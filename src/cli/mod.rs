@@ -129,14 +129,14 @@ fn wait_for_tag(reader: &mut Reader) -> Result<Vec<u8>> {
 }
 
 fn select_tag(reader: &mut Reader, epc: &[u8]) -> Result<()> {
-    reader.send(&crate::SetSelect { mask: epc.to_vec() })?;
+    reader.send(&crate::SetSelect::by_epc(epc))?;
     reader.send(&crate::SetSendSelect(true))?;
     Ok(())
 }
 
 fn clear_select(reader: &mut Reader) -> Result<()> {
     reader.send(&crate::SetSendSelect(false))?;
-    reader.send(&crate::SetSelect { mask: vec![] })?;
+    reader.send(&crate::SetSelect::by_epc(&[]))?;
     Ok(())
 }
 
