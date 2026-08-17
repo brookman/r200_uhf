@@ -40,7 +40,7 @@ pub enum FrameError {
 pub struct CommandError(pub u8);
 
 impl CommandError {
-    pub const SUCCESS: CommandError = CommandError(0x00);
+    pub const SUCCESS: Self = Self(0x00);
 
     pub fn is_success(self) -> bool {
         self.0 == 0x00

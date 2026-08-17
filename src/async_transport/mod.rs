@@ -54,7 +54,7 @@ impl<W: AsyncReadExt + AsyncWriteExt + Unpin> AsyncReader<W> {
 
         loop {
             // Try to decode from existing buffer first
-            while let Some(pos) = self.read_buf.iter().position(|&b| b == FRAME_HEADER) {
+            if let Some(pos) = self.read_buf.iter().position(|&b| b == FRAME_HEADER) {
                 if pos > 0 {
                     self.read_buf.drain(..pos);
                 }
@@ -63,7 +63,7 @@ impl<W: AsyncReadExt + AsyncWriteExt + Unpin> AsyncReader<W> {
                         self.read_buf.drain(..consumed);
                         return Ok(frame);
                     }
-                    Err(crate::core::error::FrameError::Truncated { .. }) => break,
+                    Err(crate::core::error::FrameError::Truncated { .. }) => {}
                     Err(e) => return Err(e.into()),
                 }
             }

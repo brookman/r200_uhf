@@ -1,4 +1,4 @@
-pub(crate) trait PushU16 {
+pub trait PushU16 {
     fn push_u16(&mut self, val: u16);
 }
 

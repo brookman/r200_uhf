@@ -328,8 +328,8 @@ impl Command for GetTransmitPower {
         if data.len() < 2 {
             return Err(CommandError(0xFF));
         }
-        let raw = ((data[0] as u16) << 8) | (data[1] as u16);
-        Ok(raw as f64 * 0.01)
+        let raw = (u16::from(data[0]) << 8) | u16::from(data[1]);
+        Ok(f64::from(raw) * 0.01)
     }
 }
 

@@ -24,12 +24,13 @@ impl Region {
     }
 
     pub fn channel_frequency(self, channel: u8) -> f64 {
+        let ch = f64::from(channel);
         match self {
-            Self::China900Mhz => 920.125 + channel as f64 * 0.25,
-            Self::China800Mhz => 840.125 + channel as f64 * 0.25,
-            Self::Us => 902.75 + channel as f64 * 0.5,
-            Self::Eu => 865.1 + channel as f64 * 0.6,
-            Self::Korea => 917.1 + channel as f64 * 0.2,
+            Self::China900Mhz => 920.125 + ch * 0.25,
+            Self::China800Mhz => 840.125 + ch * 0.25,
+            Self::Us => 902.75 + ch * 0.5,
+            Self::Eu => 865.1 + ch * 0.6,
+            Self::Korea => 917.1 + ch * 0.2,
         }
     }
 }

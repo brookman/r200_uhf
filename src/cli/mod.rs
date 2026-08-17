@@ -12,7 +12,7 @@ mod display;
 
 pub fn parse_hex(s: &str) -> Result<Vec<u8>> {
     let s = s.strip_prefix("0x").unwrap_or(s);
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         anyhow::bail!("hex string must have even length");
     }
     (0..s.len())
@@ -43,7 +43,7 @@ enum Commands {
     Poll,
     /// Continuous scan with deduplication (Ctrl+C to stop)
     Scan {
-        /// Skip sending StopMultiplePolling on exit
+        /// Skip sending `StopMultiplePolling` on exit
         #[arg(long)]
         no_stop: bool,
     },
@@ -113,13 +113,9 @@ enum Commands {
 fn wait_for_tag(reader: &mut crate::sync::SyncReader<impl std::io::Read + std::io::Write>) -> Result<Vec<u8>> {
     eprint!("Place a tag on the antenna... ");
     loop {
-        match reader.send(&crate::SinglePollingInstruction) {
-            Ok(Some(tag)) => {
-                eprintln!("found {}", tag.epc_hex());
-                return Ok(tag.epc.clone());
-            }
-            Ok(None) => {}
-            Err(_) => {}
+        if let Ok(Some(tag)) = reader.send(&crate::SinglePollingInstruction) {
+            eprintln!("found {}", tag.epc_hex());
+            return Ok(tag.epc);
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -185,13 +181,9 @@ pub fn run() -> Result<()> {
         Commands::Poll => {
             println!("Polling for tags...");
             loop {
-                match reader.send(&crate::SinglePollingInstruction) {
-                    Ok(Some(tag)) => {
-                        display::display_tag(&tag);
-                        break;
-                    }
-                    Ok(None) => {}
-                    Err(_) => {} // device returns error when no tag in range
+                if let Ok(Some(tag)) = reader.send(&crate::SinglePollingInstruction) {
+                    display::display_tag(&tag);
+                    break;
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
@@ -217,10 +209,9 @@ pub fn run() -> Result<()> {
                         Ok(frame) if frame.command_code == 0x22 => {
                             if let Ok(Some(tag)) =
                                 crate::SinglePollingInstruction.decode_response(&frame.data)
+                                && seen.insert(tag.epc_hex())
                             {
-                                if seen.insert(tag.epc_hex()) {
-                                    display::display_tag(&tag);
-                                }
+                                display::display_tag(&tag);
                             }
                         }
                         Ok(_) => {}
@@ -261,8 +252,7 @@ pub fn run() -> Result<()> {
             }
 
             println!(
-                "Reading {} words from {} bank, addr 0x{:04X}...",
-                length, mem_bank, addr
+                "Reading {length} words from {mem_bank} bank, addr 0x{addr:04X}..."
             );
 
             let data = reader.send(&crate::ReadLabel {
@@ -276,7 +266,8 @@ pub fn run() -> Result<()> {
                 clear_select(&mut reader)?;
             }
 
-            println!("Hex: {}", data.iter().map(|b| format!("{b:02X}")).collect::<String>());
+            let hex_str = data.iter().map(|b| format!("{b:02X}")).collect::<String>();
+            println!("Hex: {hex_str}");
         }
 
         Commands::Write { epc, select } => {

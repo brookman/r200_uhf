@@ -45,7 +45,7 @@ impl Frame {
         buf
     }
 
-    pub fn decode(buf: &[u8]) -> Result<(Frame, usize), FrameError> {
+    pub fn decode(buf: &[u8]) -> Result<(Self, usize), FrameError> {
         if buf.len() < MIN_FRAME_LEN {
             return Err(FrameError::TooShort(buf.len()));
         }
@@ -83,7 +83,7 @@ impl Frame {
 
         let data = buf[5..5 + data_len].to_vec();
         Ok((
-            Frame {
+            Self {
                 frame_type,
                 command_code,
                 data,
@@ -94,7 +94,7 @@ impl Frame {
 }
 
 pub fn checksum(bytes: &[u8]) -> u8 {
-    bytes.iter().fold(0u16, |acc, &b| acc + b as u16) as u8
+    bytes.iter().fold(0u16, |acc, &b| acc + u16::from(b)) as u8
 }
 
 #[cfg(test)]
