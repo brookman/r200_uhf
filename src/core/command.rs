@@ -128,7 +128,7 @@ impl Command for SetSendSelect {
     const CODE: u8 = 0x12;
 
     fn encode(&self) -> Vec<u8> {
-        vec![if self.0 { 0x01 } else { 0x00 }]
+        vec![if self.0 { 0x02 } else { 0x01 }]
     }
 
     fn decode_response(&self, _data: &[u8]) -> Result<(), CommandError> {
@@ -172,6 +172,7 @@ impl fmt::Display for MemBank {
 }
 
 pub struct ReadLabel {
+    pub access_password: [u8; 4],
     pub bank: MemBank,
     pub address: u16,
     pub length: u16,
@@ -182,13 +183,14 @@ impl Command for ReadLabel {
     const CODE: u8 = 0x39;
 
     fn encode(&self) -> Vec<u8> {
-        vec![
-            self.bank as u8,
-            (self.address >> 8) as u8,
-            (self.address & 0xFF) as u8,
-            (self.length >> 8) as u8,
-            (self.length & 0xFF) as u8,
-        ]
+        let mut buf = Vec::with_capacity(9);
+        buf.extend_from_slice(&self.access_password);
+        buf.push(self.bank as u8);
+        buf.push((self.address >> 8) as u8);
+        buf.push((self.address & 0xFF) as u8);
+        buf.push((self.length >> 8) as u8);
+        buf.push((self.length & 0xFF) as u8);
+        buf
     }
 
     fn decode_response(&self, data: &[u8]) -> Result<Vec<u8>, CommandError> {
@@ -200,6 +202,7 @@ impl Command for ReadLabel {
 }
 
 pub struct WriteLabel {
+    pub access_password: [u8; 4],
     pub bank: MemBank,
     pub address: u16,
     pub data: Vec<u8>,
@@ -211,7 +214,8 @@ impl Command for WriteLabel {
 
     fn encode(&self) -> Vec<u8> {
         let word_count = self.data.len() / 2;
-        let mut buf = Vec::with_capacity(5 + self.data.len());
+        let mut buf = Vec::with_capacity(9 + self.data.len());
+        buf.extend_from_slice(&self.access_password);
         buf.push(self.bank as u8);
         buf.push((self.address >> 8) as u8);
         buf.push((self.address & 0xFF) as u8);
@@ -247,7 +251,7 @@ impl Command for KillTag {
 
 pub struct LockTag {
     pub password: [u8; 4],
-    pub lock_data: u16,
+    pub lock_data: [u8; 3],
 }
 
 impl Command for LockTag {
@@ -255,10 +259,9 @@ impl Command for LockTag {
     const CODE: u8 = 0x82;
 
     fn encode(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(6);
+        let mut buf = Vec::with_capacity(7);
         buf.extend_from_slice(&self.password);
-        buf.push((self.lock_data >> 8) as u8);
-        buf.push((self.lock_data & 0xFF) as u8);
+        buf.extend_from_slice(&self.lock_data);
         buf
     }
 
@@ -303,32 +306,16 @@ impl Command for SetWorkingArea {
 pub struct GetWorkingChannel;
 
 impl Command for GetWorkingChannel {
-    type Response = ChannelInfo;
+    type Response = u8;
     const CODE: u8 = 0xAA;
 
     fn encode(&self) -> Vec<u8> {
         vec![]
     }
 
-    fn decode_response(&self, data: &[u8]) -> Result<ChannelInfo, CommandError> {
-        if data.len() < 2 {
-            return Err(CommandError(0xFF));
-        }
-        let area_byte = data[1];
-        let channel = data[0];
-        let region = crate::core::region::Region::from_byte(area_byte)
-            .ok_or(CommandError(0xFF))?;
-        Ok(ChannelInfo {
-            current_channel: channel,
-            frequency_mhz: region.channel_frequency(channel),
-        })
+    fn decode_response(&self, data: &[u8]) -> Result<u8, CommandError> {
+        data.first().copied().ok_or(CommandError(0xFF))
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct ChannelInfo {
-    pub current_channel: u8,
-    pub frequency_mhz: f64,
 }
 
 pub struct GetTransmitPower;
@@ -441,39 +428,44 @@ mod tests {
 
     #[test]
     fn set_send_select_encode() {
-        assert_eq!(SetSendSelect(true).encode(), vec![0x01]);
-        assert_eq!(SetSendSelect(false).encode(), vec![0x00]);
+        assert_eq!(SetSendSelect(true).encode(), vec![0x02]);
+        assert_eq!(SetSendSelect(false).encode(), vec![0x01]);
     }
 
     #[test]
     fn read_label_encode() {
         let cmd = ReadLabel {
+            access_password: [0x00; 4],
             bank: MemBank::Epc,
             address: 0x0000,
             length: 4,
         };
-        assert_eq!(cmd.encode(), vec![0x01, 0x00, 0x00, 0x00, 0x04]);
+        assert_eq!(
+            cmd.encode(),
+            vec![0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x04]
+        );
     }
 
     #[test]
     fn read_label_decode_strips_prefix() {
         let data = vec![0x01, 0x02, 0x03, 0xAA, 0xBB, 0xCC];
-        let resp = ReadLabel { bank: MemBank::Epc, address: 0, length: 0 }.decode_response(&data).unwrap();
+        let resp = ReadLabel { access_password: [0; 4], bank: MemBank::Epc, address: 0, length: 0 }.decode_response(&data).unwrap();
         assert_eq!(resp, vec![0xAA, 0xBB, 0xCC]);
     }
 
     #[test]
     fn write_label_encode() {
         let cmd = WriteLabel {
+            access_password: [0x00; 4],
             bank: MemBank::Epc,
             address: 0x0000,
             data: vec![0xAA, 0xBB, 0xCC, 0xDD],
         };
         let enc = cmd.encode();
-        assert_eq!(enc[0], 0x01); // bank
-        assert_eq!(enc[3], 0x00); // word count high
-        assert_eq!(enc[4], 0x02); // word count low (4 bytes = 2 words)
-        assert_eq!(&enc[5..], &[0xAA, 0xBB, 0xCC, 0xDD]);
+        assert_eq!(enc[4], 0x01); // bank
+        assert_eq!(enc[7], 0x00); // word count high
+        assert_eq!(enc[8], 0x02); // word count low (4 bytes = 2 words)
+        assert_eq!(&enc[9..], &[0xAA, 0xBB, 0xCC, 0xDD]);
     }
 
     #[test]
@@ -488,9 +480,12 @@ mod tests {
     fn lock_tag_encode() {
         let cmd = LockTag {
             password: [0x11, 0x22, 0x33, 0x44],
-            lock_data: 0x0000,
+            lock_data: [0x02, 0x00, 0x80],
         };
-        assert_eq!(cmd.encode(), vec![0x11, 0x22, 0x33, 0x44, 0x00, 0x00]);
+        assert_eq!(
+            cmd.encode(),
+            vec![0x11, 0x22, 0x33, 0x44, 0x02, 0x00, 0x80]
+        );
     }
 
     #[test]
@@ -517,9 +512,8 @@ mod tests {
 
     #[test]
     fn get_working_channel_decode() {
-        let resp = GetWorkingChannel.decode_response(&[0x05, 0x03]).unwrap();
-        assert_eq!(resp.current_channel, 5);
-        assert!(resp.frequency_mhz > 860.0);
+        let resp = GetWorkingChannel.decode_response(&[0x05]).unwrap();
+        assert_eq!(resp, 5);
     }
 
     #[test]

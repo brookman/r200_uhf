@@ -10,10 +10,10 @@ pub mod async_transport;
 pub mod cli;
 
 pub use core::command::{
-    ChannelInfo, Command, GetModuleInfo, GetTransmitPower, GetWorkingArea, GetWorkingChannel,
-    KillTag, LockTag, MemBank, ModuleInfoParam, ModuleInfoResponse, MultiplePollingInstruction,
-    ReadLabel, SetSelect, SetSendSelect, SetTransmitPower, SetWorkingArea, SinglePollingInstruction,
-    StopMultiplePolling, WriteLabel,
+    GetModuleInfo, GetTransmitPower, GetWorkingArea, GetWorkingChannel, KillTag, LockTag, MemBank,
+    ModuleInfoParam, ModuleInfoResponse, MultiplePollingInstruction, ReadLabel, SetSelect,
+    SetSendSelect, SetTransmitPower, SetWorkingArea, SinglePollingInstruction, StopMultiplePolling,
+    WriteLabel,
 };
 pub use core::error::{CommandError, CoreError, FrameError};
 pub use core::frame::{Frame, FrameType};
