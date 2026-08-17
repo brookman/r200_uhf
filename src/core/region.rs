@@ -24,14 +24,17 @@ impl Region {
         }
     }
 
+    /// Channel center frequency in MHz for the given channel index.
+    ///
+    /// Formulas per R200 protocol spec §14 (`Freq_CH = CH_Index * step + base`).
     #[must_use]
     pub fn channel_frequency(self, channel: u8) -> f64 {
         let ch = f64::from(channel);
         match self {
             Self::China900Mhz => ch.mul_add(0.25, 920.125),
             Self::China800Mhz => ch.mul_add(0.25, 840.125),
-            Self::Us => ch.mul_add(0.5, 902.75),
-            Self::Eu => ch.mul_add(0.6, 865.1),
+            Self::Us => ch.mul_add(0.5, 902.25),
+            Self::Eu => ch.mul_add(0.2, 865.1),
             Self::Korea => ch.mul_add(0.2, 917.1),
         }
     }
@@ -71,14 +74,16 @@ mod tests {
 
     #[test]
     fn channel_frequency_eu() {
+        // spec §14: Freq_CH = CH_Index * 0.2 + 865.1
         assert!((Region::Eu.channel_frequency(0) - 865.1).abs() < 0.001);
-        assert!((Region::Eu.channel_frequency(5) - 868.1).abs() < 0.001);
+        assert!((Region::Eu.channel_frequency(5) - 866.1).abs() < 0.001);
     }
 
     #[test]
     fn channel_frequency_us() {
-        assert!((Region::Us.channel_frequency(0) - 902.75).abs() < 0.001);
-        assert!((Region::Us.channel_frequency(1) - 903.25).abs() < 0.001);
+        // spec §14: Freq_CH = CH_Index * 0.5 + 902.25
+        assert!((Region::Us.channel_frequency(0) - 902.25).abs() < 0.001);
+        assert!((Region::Us.channel_frequency(1) - 902.75).abs() < 0.001);
     }
 
     #[test]
