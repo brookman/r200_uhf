@@ -5,7 +5,6 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 mod display;
-mod port;
 
 pub fn parse_hex(s: &str) -> Result<Vec<u8>> {
     let s = s.strip_prefix("0x").unwrap_or(s);
