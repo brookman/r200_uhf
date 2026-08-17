@@ -118,6 +118,80 @@ pub fn checksum(bytes: &[u8]) -> u8 {
     }
 }
 
+/// Command code the device uses for error response frames.
+pub const ERROR_FRAME_CODE: u8 = 0xFF;
+
+/// A streaming frame decoder that buffers raw bytes and yields complete frames.
+///
+/// Both the sync and async transports feed bytes in via [`FrameDecoder::extend`]
+/// and repeatedly call [`FrameDecoder::next_frame`]. This keeps the byte-level
+/// framing logic in one place, independent of the I/O mechanism (sans-io).
+#[derive(Debug, Default)]
+pub struct FrameDecoder {
+    buf: Vec<u8>,
+}
+
+impl FrameDecoder {
+    /// Create a decoder with a pre-allocated buffer.
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            buf: Vec::with_capacity(capacity),
+        }
+    }
+
+    /// Append freshly-read bytes to the internal buffer.
+    pub fn extend(&mut self, bytes: &[u8]) {
+        self.buf.extend_from_slice(bytes);
+    }
+
+    /// Number of bytes currently buffered.
+    #[must_use]
+    pub const fn buffered(&self) -> usize {
+        self.buf.len()
+    }
+
+    /// Try to decode the next complete frame from the buffer.
+    ///
+    /// Leading noise before a [`FRAME_HEADER`] is discarded. Returns `Ok(None)`
+    /// when more bytes are needed to complete a frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameError`] for a malformed frame (bad checksum, missing end
+    /// marker, unknown frame type, ...). A truncated frame is not an error; it
+    /// yields `Ok(None)` so the caller can read more bytes.
+    pub fn next_frame(&mut self) -> Result<Option<Frame>, FrameError> {
+        let Some(pos) = self.buf.iter().position(|&b| b == FRAME_HEADER) else {
+            return Ok(None);
+        };
+        if pos > 0 {
+            self.buf.drain(..pos);
+        }
+        match Frame::decode(&self.buf) {
+            Ok((frame, consumed)) => {
+                self.buf.drain(..consumed);
+                Ok(Some(frame))
+            }
+            Err(FrameError::TooShort(_) | FrameError::Truncated { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// Map an error response frame (command code `0xFF`) to its [`CommandError`].
+///
+/// Returns `None` for non-error frames.
+#[must_use]
+pub fn error_frame_to_command_error(frame: &Frame) -> Option<crate::core::error::CommandError> {
+    if frame.command_code == ERROR_FRAME_CODE {
+        let code = frame.data.first().copied().unwrap_or(ERROR_FRAME_CODE);
+        Some(crate::core::error::CommandError(code))
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,5 +304,67 @@ mod tests {
         let (frame2, consumed2) = Frame::decode(&buf[consumed1..]).unwrap();
         assert_eq!(frame2.command_code, 0x22);
         assert_eq!(consumed2, f2.len());
+    }
+
+    #[test]
+    fn decoder_yields_frames_across_chunks() {
+        let wire = Frame::encode_command(0x22, &[0xAA, 0xBB]);
+        let (head, tail) = wire.split_at(4);
+
+        let mut dec = FrameDecoder::default();
+        dec.extend(head);
+        // Incomplete: needs more bytes, not an error.
+        assert!(dec.next_frame().unwrap().is_none());
+        dec.extend(tail);
+        let frame = dec.next_frame().unwrap().unwrap();
+        assert_eq!(frame.command_code, 0x22);
+        assert_eq!(frame.data, vec![0xAA, 0xBB]);
+        // Buffer drained.
+        assert_eq!(dec.buffered(), 0);
+        assert!(dec.next_frame().unwrap().is_none());
+    }
+
+    #[test]
+    fn decoder_discards_leading_noise() {
+        let wire = Frame::encode_command(0x08, &[0x03]);
+        let mut dec = FrameDecoder::default();
+        dec.extend(&[0x00, 0xFF, 0x42]);
+        dec.extend(&wire);
+        let frame = dec.next_frame().unwrap().unwrap();
+        assert_eq!(frame.command_code, 0x08);
+        assert_eq!(frame.data, vec![0x03]);
+    }
+
+    #[test]
+    fn decoder_propagates_checksum_error() {
+        let mut wire = Frame::encode_command(0x03, &[0x01]);
+        let cs_idx = wire.len() - 2;
+        wire[cs_idx] ^= 0xFF;
+        let mut dec = FrameDecoder::default();
+        dec.extend(&wire);
+        assert!(matches!(
+            dec.next_frame(),
+            Err(FrameError::ChecksumMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn error_frame_maps_to_command_error() {
+        let ok = Frame {
+            frame_type: FrameType::Response,
+            command_code: 0x22,
+            data: vec![],
+        };
+        assert!(error_frame_to_command_error(&ok).is_none());
+
+        let err = Frame {
+            frame_type: FrameType::Response,
+            command_code: ERROR_FRAME_CODE,
+            data: vec![0x09],
+        };
+        assert_eq!(
+            error_frame_to_command_error(&err),
+            Some(crate::core::error::CommandError(0x09))
+        );
     }
 }

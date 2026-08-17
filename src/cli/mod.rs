@@ -256,11 +256,7 @@ fn cmd_read(
         clear_select(reader)?;
     }
 
-    let hex_str = data.iter().fold(String::new(), |mut s, b| {
-        use std::fmt::Write;
-        let _ = write!(s, "{b:02X}");
-        s
-    });
+    let hex_str = crate::util::hex_upper(&data);
     println!("Hex: {hex_str}");
     Ok(())
 }

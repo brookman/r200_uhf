@@ -73,11 +73,7 @@ impl fmt::Display for Tag {
 
 #[must_use]
 pub fn hex_bytes(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    bytes.iter().fold(String::new(), |mut s, b| {
-        let _ = write!(s, "{b:02x}");
-        s
-    })
+    crate::util::hex_lower(bytes)
 }
 
 #[cfg(test)]

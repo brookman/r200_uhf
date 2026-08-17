@@ -3,13 +3,13 @@ use std::time::Duration;
 
 use crate::core::command::Command;
 use crate::core::error::CoreError;
-use crate::core::frame::{FRAME_HEADER, Frame};
+use crate::core::frame::{Frame, FrameDecoder, error_frame_to_command_error};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub struct SyncReader<W> {
     port: W,
-    read_buf: Vec<u8>,
+    decoder: FrameDecoder,
     timeout: Duration,
 }
 
@@ -17,7 +17,7 @@ impl<W: Read + Write> SyncReader<W> {
     pub fn new(port: W) -> Self {
         Self {
             port,
-            read_buf: Vec::with_capacity(4096),
+            decoder: FrameDecoder::with_capacity(4096),
             timeout: DEFAULT_TIMEOUT,
         }
     }
@@ -36,17 +36,7 @@ impl<W: Read + Write> SyncReader<W> {
     /// malformed responses, or [`CoreError::Command`] if the device reports an error.
     pub fn send<C: Command>(&mut self, cmd: &C) -> Result<C::Response, CoreError> {
         self.send_only(cmd)?;
-
-        let frame = self.read_frame()?;
-        log::trace!("recv {:02X}: {:02X?}", frame.command_code, frame.data);
-
-        if frame.command_code == 0xFF {
-            let err_code = frame.data.first().copied().unwrap_or(0xFF);
-            return Err(CoreError::Command(crate::core::error::CommandError(
-                err_code,
-            )));
-        }
-
+        let frame = self.recv()?;
         Ok(cmd.decode_response(&frame.data)?)
     }
 
@@ -74,14 +64,9 @@ impl<W: Read + Write> SyncReader<W> {
     pub fn recv(&mut self) -> Result<Frame, CoreError> {
         let frame = self.read_frame()?;
         log::trace!("recv {:02X}: {:02X?}", frame.command_code, frame.data);
-
-        if frame.command_code == 0xFF {
-            let err_code = frame.data.first().copied().unwrap_or(0xFF);
-            return Err(CoreError::Command(crate::core::error::CommandError(
-                err_code,
-            )));
+        if let Some(err) = error_frame_to_command_error(&frame) {
+            return Err(CoreError::Command(err));
         }
-
         Ok(frame)
     }
 
@@ -90,35 +75,23 @@ impl<W: Read + Write> SyncReader<W> {
         let deadline = std::time::Instant::now() + self.timeout;
 
         loop {
-            // Try to decode from existing buffer first
-            if let Some(pos) = self.read_buf.iter().position(|&b| b == FRAME_HEADER) {
-                if pos > 0 {
-                    self.read_buf.drain(..pos);
-                }
-                match Frame::decode(&self.read_buf) {
-                    Ok((frame, consumed)) => {
-                        self.read_buf.drain(..consumed);
-                        return Ok(frame);
-                    }
-                    Err(crate::core::error::FrameError::Truncated { .. }) => {}
-                    Err(e) => return Err(e.into()),
-                }
+            if let Some(frame) = self.decoder.next_frame()? {
+                return Ok(frame);
             }
 
-            // Need more data from port
             if std::time::Instant::now() >= deadline {
                 return Err(CoreError::Frame(crate::core::error::FrameError::TooShort(
-                    self.read_buf.len(),
+                    self.decoder.buffered(),
                 )));
             }
 
             let n = self.port.read(&mut tmp)?;
             if n == 0 {
                 return Err(CoreError::Frame(crate::core::error::FrameError::TooShort(
-                    self.read_buf.len(),
+                    self.decoder.buffered(),
                 )));
             }
-            self.read_buf.extend_from_slice(&tmp[..n]);
+            self.decoder.extend(&tmp[..n]);
         }
     }
 }
@@ -129,7 +102,7 @@ mod tests {
     use crate::Region;
     use crate::core::command::*;
     use crate::core::error::CommandError;
-    use crate::core::frame::FrameType;
+    use crate::core::frame::{FRAME_HEADER, FrameType};
     use crate::util::PushU16;
     use std::io::{Cursor, Read, Write};
 

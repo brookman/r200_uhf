@@ -5,14 +5,14 @@ use tokio::time::timeout;
 
 use crate::core::command::Command;
 use crate::core::error::CoreError;
-use crate::core::frame::{FRAME_HEADER, Frame};
+use crate::core::frame::{Frame, FrameDecoder, error_frame_to_command_error};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub struct AsyncReader<W> {
     port: W,
     timeout: Duration,
-    read_buf: Vec<u8>,
+    decoder: FrameDecoder,
 }
 
 impl<W: AsyncReadExt + AsyncWriteExt + Unpin + Send> AsyncReader<W> {
@@ -20,7 +20,7 @@ impl<W: AsyncReadExt + AsyncWriteExt + Unpin + Send> AsyncReader<W> {
         Self {
             port,
             timeout: DEFAULT_TIMEOUT,
-            read_buf: Vec::with_capacity(4096),
+            decoder: FrameDecoder::with_capacity(4096),
         }
     }
 
@@ -53,11 +53,8 @@ impl<W: AsyncReadExt + AsyncWriteExt + Unpin + Send> AsyncReader<W> {
 
         log::trace!("recv {:02X}: {:02X?}", frame.command_code, frame.data);
 
-        if frame.command_code == 0xFF {
-            let err_code = frame.data.first().copied().unwrap_or(0xFF);
-            return Err(CoreError::Command(crate::core::error::CommandError(
-                err_code,
-            )));
+        if let Some(err) = error_frame_to_command_error(&frame) {
+            return Err(CoreError::Command(err));
         }
 
         Ok(frame)
@@ -67,29 +64,17 @@ impl<W: AsyncReadExt + AsyncWriteExt + Unpin + Send> AsyncReader<W> {
         let mut tmp = [0u8; 1024];
 
         loop {
-            // Try to decode from existing buffer first
-            if let Some(pos) = self.read_buf.iter().position(|&b| b == FRAME_HEADER) {
-                if pos > 0 {
-                    self.read_buf.drain(..pos);
-                }
-                match Frame::decode(&self.read_buf) {
-                    Ok((frame, consumed)) => {
-                        self.read_buf.drain(..consumed);
-                        return Ok(frame);
-                    }
-                    Err(crate::core::error::FrameError::Truncated { .. }) => {}
-                    Err(e) => return Err(e.into()),
-                }
+            if let Some(frame) = self.decoder.next_frame()? {
+                return Ok(frame);
             }
 
-            // Need more data from port
             let n = self.port.read(&mut tmp).await?;
             if n == 0 {
                 return Err(CoreError::Frame(crate::core::error::FrameError::TooShort(
-                    self.read_buf.len(),
+                    self.decoder.buffered(),
                 )));
             }
-            self.read_buf.extend_from_slice(&tmp[..n]);
+            self.decoder.extend(&tmp[..n]);
         }
     }
 }
@@ -100,7 +85,7 @@ mod tests {
     use crate::Region;
     use crate::core::command::*;
     use crate::core::error::CommandError;
-    use crate::core::frame::FrameType;
+    use crate::core::frame::{FRAME_HEADER, FrameType};
     use crate::util::PushU16;
 
     fn response_frame(command_code: u8, data: &[u8]) -> Vec<u8> {
