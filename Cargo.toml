@@ -1,8 +1,8 @@
 [package]
 name = "r200_uhf"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
-description = "Sans-IO serial protocol library for R200 UHF RFID readers"
+description = "Serial protocol library for R200 UHF RFID readers"
 license = "MIT"
 repository = "https://github.com/oniram88/r200_uhf"
 
