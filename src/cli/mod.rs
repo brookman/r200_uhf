@@ -1,8 +1,12 @@
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+
+use crate::core::command::Command;
 
 mod display;
 
@@ -38,7 +42,13 @@ enum Commands {
     /// Poll for a single tag
     Poll,
     /// Continuous scan with deduplication (Ctrl+C to stop)
-    Scan,
+    Scan {
+        /// Skip sending StopMultiplePolling on exit
+        #[arg(long)]
+        no_stop: bool,
+    },
+    /// Stop a running multi-polling scan
+    StopScan,
     /// Read memory from a tag
     Read {
         /// Memory bank: 0=Reserved, 1=EPC, 2=TID, 3=User
@@ -130,6 +140,12 @@ fn clear_select(reader: &mut crate::sync::SyncReader<impl std::io::Read + std::i
     Ok(())
 }
 
+fn stop_scan(reader: &mut crate::sync::SyncReader<impl std::io::Read + std::io::Write>) -> Result<()> {
+    reader.send_only(&crate::StopMultiplePolling)?;
+    let _ = reader.recv();
+    Ok(())
+}
+
 pub fn run() -> Result<()> {
     env_logger::init();
     let cli = Cli::parse();
@@ -181,21 +197,47 @@ pub fn run() -> Result<()> {
             }
         }
 
-        Commands::Scan => {
+        Commands::Scan { no_stop } => {
             println!("Scanning... (Ctrl+C to stop)");
+            let running = Arc::new(AtomicBool::new(true));
+            let r = running.clone();
+            ctrlc::set_handler(move || {
+                r.store(false, Ordering::SeqCst);
+            })
+            .context("setting up Ctrl+C handler")?;
+
             let mut seen = HashSet::new();
-            loop {
-                match reader.send(&crate::SinglePollingInstruction) {
-                    Ok(Some(tag)) => {
-                        if seen.insert(tag.epc_hex()) {
-                            display::display_tag(&tag);
+            while running.load(Ordering::SeqCst) {
+                let _ = reader.send_only(&crate::MultiplePollingInstruction {
+                    pool_times: 100,
+                });
+
+                loop {
+                    match reader.recv() {
+                        Ok(frame) if frame.command_code == 0x22 => {
+                            if let Ok(Some(tag)) =
+                                crate::SinglePollingInstruction.decode_response(&frame.data)
+                            {
+                                if seen.insert(tag.epc_hex()) {
+                                    display::display_tag(&tag);
+                                }
+                            }
                         }
+                        Ok(_) => {}
+                        Err(_) => break,
                     }
-                    Ok(None) => {}
-                    Err(_) => {}
                 }
-                std::thread::sleep(Duration::from_millis(50));
             }
+
+            if !no_stop {
+                stop_scan(&mut reader)?;
+            }
+            println!("Scan stopped.");
+        }
+
+        Commands::StopScan => {
+            stop_scan(&mut reader)?;
+            println!("Scan stopped.");
         }
 
         Commands::Read {

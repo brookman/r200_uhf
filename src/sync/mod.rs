@@ -28,10 +28,7 @@ impl<W: Read + Write> SyncReader<W> {
     }
 
     pub fn send<C: Command>(&mut self, cmd: &C) -> Result<C::Response, CoreError> {
-        let wire = Frame::encode_command(C::CODE, &cmd.encode());
-        log::trace!("send {:02X}: {:02X?}", C::CODE, wire);
-        self.port.write_all(&wire)?;
-        self.port.flush()?;
+        self.send_only(cmd)?;
 
         let frame = self.read_frame()?;
         log::trace!("recv {:02X}: {:02X?}", frame.command_code, frame.data);
@@ -42,6 +39,30 @@ impl<W: Read + Write> SyncReader<W> {
         }
 
         Ok(cmd.decode_response(&frame.data)?)
+    }
+
+    /// Send a command without waiting for a response.
+    /// Used for multi-polling where responses arrive asynchronously.
+    pub fn send_only<C: Command>(&mut self, cmd: &C) -> Result<(), CoreError> {
+        let wire = Frame::encode_command(C::CODE, &cmd.encode());
+        log::trace!("send {:02X}: {:02X?}", C::CODE, wire);
+        self.port.write_all(&wire)?;
+        self.port.flush()?;
+        Ok(())
+    }
+
+    /// Read the next response frame without sending a command first.
+    /// Used during multi-polling mode where the device sends tag reports asynchronously.
+    pub fn recv(&mut self) -> Result<Frame, CoreError> {
+        let frame = self.read_frame()?;
+        log::trace!("recv {:02X}: {:02X?}", frame.command_code, frame.data);
+
+        if frame.command_code == 0xFF {
+            let err_code = frame.data.first().copied().unwrap_or(0xFF);
+            return Err(CoreError::Command(crate::core::error::CommandError(err_code)));
+        }
+
+        Ok(frame)
     }
 
     fn read_frame(&mut self) -> Result<Frame, CoreError> {

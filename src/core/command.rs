@@ -69,7 +69,7 @@ impl Command for SinglePollingInstruction {
 }
 
 pub struct MultiplePollingInstruction {
-    pub duration_ms: u16,
+    pub pool_times: u16,
 }
 
 impl Command for MultiplePollingInstruction {
@@ -78,7 +78,7 @@ impl Command for MultiplePollingInstruction {
 
     fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(2);
-        buf.push_u16(self.duration_ms);
+        buf.push_u16(self.pool_times);
         buf
     }
 
@@ -407,7 +407,7 @@ mod tests {
 
     #[test]
     fn multi_polling_encode() {
-        let cmd = MultiplePollingInstruction { duration_ms: 1000 };
+        let cmd = MultiplePollingInstruction { pool_times: 1000 };
         assert_eq!(cmd.encode(), vec![0x03, 0xE8]);
     }
 
