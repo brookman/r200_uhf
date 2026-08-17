@@ -3,19 +3,6 @@ All notable changes to this project will be documented in this file. See [conven
 
 - - -
 
-## 0.7.0 - 2026-08-17
-#### Refactoring
-- Rewrite crate from first principles with sans-io core - (2618b26) - Beni Bachmann
-#### Continuous Integration
-- Add fmt check, clippy, and tests to rust.yml - (13cabce) - Beni Bachmann
-#### Bug Fixes
-- Protocol encoding fixes verified on real device - (c15869c) - Beni Bachmann
-- Use open() with timeout in examples (open_native had no timeout) - (14ef360) - Beni Bachmann
-- Multi-polling scan — remove 0x22 prefix, filter on cmd=0x22, clean up API - (22c3052) - Beni Bachmann
-- Add strict clippy checks and Rresolve all warnings - (4b1c868) - Beni Bachmann
-
-- - -
-
 ## 0.6.0 - 2026-08-16
 #### Features
 - Add Write/Lock/Kill features - (9687ad9) - Beni Bachmann
