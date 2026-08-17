@@ -207,9 +207,10 @@ fn cmd_scan(reader: &mut Reader, no_stop: bool) -> Result<()> {
                 Ok(frame) if frame.command_code == 0x22 => {
                     if let Ok(Some(tag)) =
                         crate::SinglePollingInstruction.decode_response(&frame.data)
-                        && seen.insert(tag.epc_hex())
                     {
-                        display::display_tag(&tag);
+                        if seen.insert(tag.epc_hex()) {
+                            display::display_tag(&tag);
+                        }
                     }
                 }
                 Ok(_) => {}
