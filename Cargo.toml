@@ -2,50 +2,45 @@
 name = "r200_uhf"
 version = "0.6.0"
 edition = "2024"
-description = "Serial protocol library for R200 UHF RFID readers: inventory, read/write, kill, lock"
+description = "Sans-IO serial protocol library for R200 UHF RFID readers"
 license = "MIT"
 repository = "https://github.com/oniram88/r200_uhf"
 
-
 [dependencies]
 log = "0.4"
+thiserror = "2"
 serde = { version = "1", features = ["derive"], optional = true }
-async-trait = { version = "0.1", optional = true }
 tokio = { version = "1", features = ["io-util", "time"], optional = true }
-futures = { version = "0.3", optional = true }
-async-stream = { version = "0.3", optional = true }
 
-# CLI-only dependencies (see the `cli` feature)
+# cli-only
 clap = { version = "4", features = ["derive", "env"], optional = true }
 anyhow = { version = "1", optional = true }
-serialport = { version = "4.8", optional = true }
+serialport = { version = "4", optional = true }
 env_logger = { version = "0.11", optional = true }
-gs1 = { version = "0.1", optional = true }
 ctrlc = { version = "3", optional = true }
 
 [features]
 default = []
-# Enable Serde serialization/deserialization for the structures when requested
+sync = []
+async = ["dep:tokio"]
+cli = ["sync", "dep:clap", "dep:anyhow", "dep:serialport", "dep:env_logger", "dep:ctrlc"]
 serde = ["dep:serde"]
-async = ["async-trait", "tokio", "futures", "async-stream"]
-# CLI: enables the interactive `r200` binary (see [[bin]] below)
-cli = ["dep:clap", "dep:anyhow", "dep:serialport", "dep:env_logger", "dep:gs1", "dep:ctrlc"]
-
 
 [dev-dependencies]
-serialport = "4.8"
-env_logger = "0.11"
-tokio-serial = "5.4.5"
-## Tokio is needed to compile/run the async examples that use #[tokio::main]
-## Enable the features required by the runtime and macros without requiring
-## activation of the library's optional feature.
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "time"] }
-
-[[example]]
-name = "async_std_pc_serial"
-required-features = ["async"]
+tokio-serial = "5.4.5"
+serialport = "4"
+env_logger = "0.11"
 
 [[bin]]
 name = "r200"
 path = "src/main.rs"
 required-features = ["cli"]
+
+[[example]]
+name = "async_poll"
+required-features = ["async"]
+
+[[example]]
+name = "sync_poll"
+required-features = ["sync"]
