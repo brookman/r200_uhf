@@ -198,10 +198,13 @@ impl Command for ReadLabel {
     }
 
     fn decode_response(&self, data: &[u8]) -> Result<Vec<u8>, CommandError> {
-        if data.len() < 3 {
-            return Err(CommandError(0xFF));
-        }
-        Ok(data[3..].to_vec())
+        // Response layout (spec §6.4): UL(1) + PC(2) + EPC(UL-2) + Data(N),
+        // where UL is the combined PC+EPC length in bytes. The read-back data
+        // follows the echoed PC+EPC, so it starts at offset 1 + UL.
+        let ul = *data.first().ok_or(CommandError(0xFF))? as usize;
+        data.get(1 + ul..)
+            .map(<[u8]>::to_vec)
+            .ok_or(CommandError(0xFF))
     }
 }
 
@@ -463,8 +466,15 @@ mod tests {
     }
 
     #[test]
-    fn read_label_decode_strips_prefix() {
-        let data = vec![0x01, 0x02, 0x03, 0xAA, 0xBB, 0xCC];
+    fn read_label_decode_strips_pc_epc() {
+        // Spec §6.4 response: UL(1) + PC(2) + EPC(UL-2) + Data(N).
+        // UL = 0x0E = 14 = PC(2) + EPC(12); data follows at offset 1 + UL.
+        let data = vec![
+            0x0E, // UL
+            0x30, 0x00, // PC
+            0xE2, 0x80, 0x68, 0x94, 0x00, 0x00, 0x40, 0x1A, 0x48, 0xB8, 0xA1, 0x01, // EPC
+            0xAA, 0xBB, 0xCC, 0xDD, // read-back data
+        ];
         let resp = ReadLabel {
             access_password: [0; 4],
             bank: MemBank::Epc,
@@ -473,7 +483,21 @@ mod tests {
         }
         .decode_response(&data)
         .unwrap();
-        assert_eq!(resp, vec![0xAA, 0xBB, 0xCC]);
+        assert_eq!(resp, vec![0xAA, 0xBB, 0xCC, 0xDD]);
+    }
+
+    #[test]
+    fn read_label_decode_rejects_short() {
+        let cmd = ReadLabel {
+            access_password: [0; 4],
+            bank: MemBank::Epc,
+            address: 0,
+            length: 0,
+        };
+        // Empty payload: no UL byte.
+        assert!(cmd.decode_response(&[]).is_err());
+        // UL declares more PC+EPC than present.
+        assert!(cmd.decode_response(&[0x0E, 0x30, 0x00]).is_err());
     }
 
     #[test]
