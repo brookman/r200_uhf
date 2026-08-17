@@ -58,3 +58,6 @@ required-features = ["async"]
 
 [[example]]
 name = "sync_poll"
+
+[[example]]
+name = "hardware_in_the_loop"

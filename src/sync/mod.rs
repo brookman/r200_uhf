@@ -30,14 +30,28 @@ impl<W: Read + Write> SyncReader<W> {
 
     /// Send a command and wait for its typed response.
     ///
+    /// Unsolicited notification frames (e.g. tag reports left over from a
+    /// multi-polling session) whose command code does not match the request are
+    /// skipped, so a stray report cannot be mistaken for this command's
+    /// response. Device error frames (`0xFF`) are always surfaced.
+    ///
     /// # Errors
     ///
     /// Returns [`CoreError::Io`] on serial I/O failure, [`CoreError::Frame`] on
     /// malformed responses, or [`CoreError::Command`] if the device reports an error.
     pub fn send<C: Command>(&mut self, cmd: &C) -> Result<C::Response, CoreError> {
         self.send_only(cmd)?;
-        let frame = self.recv()?;
-        cmd.decode_response(&frame.data)
+        loop {
+            let frame = self.recv()?;
+            if frame.command_code == C::CODE {
+                return cmd.decode_response(&frame.data);
+            }
+            log::trace!(
+                "skipping unsolicited frame {:02X} while awaiting {:02X}",
+                frame.command_code,
+                C::CODE
+            );
+        }
     }
 
     /// Send a command without waiting for a response.

@@ -32,21 +32,33 @@ impl<W: AsyncReadExt + AsyncWriteExt + Unpin + Send> AsyncReader<W> {
 
     /// Send a command and wait for its typed response.
     ///
+    /// Unsolicited notification frames whose command code does not match the
+    /// request are skipped, so a stray tag report cannot be mistaken for this
+    /// command's response. Device error frames (`0xFF`) are always surfaced.
+    ///
     /// # Errors
     ///
     /// Returns [`CoreError::Io`] on I/O failure, [`CoreError::Frame`] on
     /// malformed responses, or [`CoreError::Command`] if the device reports an error.
     pub async fn send<C: Command + Sync>(&mut self, cmd: &C) -> Result<C::Response, CoreError> {
         let wire = Frame::encode_command(C::CODE, &cmd.encode());
-        let frame = self.send_recv(&wire).await?;
-        cmd.decode_response(&frame.data)
+        self.port.write_all(&wire).await?;
+        self.port.flush().await?;
+        log::trace!("send {wire:02X?}");
+        loop {
+            let frame = self.recv_frame().await?;
+            if frame.command_code == C::CODE {
+                return cmd.decode_response(&frame.data);
+            }
+            log::trace!(
+                "skipping unsolicited frame {:02X} while awaiting {:02X}",
+                frame.command_code,
+                C::CODE
+            );
+        }
     }
 
-    async fn send_recv(&mut self, wire: &[u8]) -> Result<Frame, CoreError> {
-        log::trace!("send {wire:02X?}");
-        self.port.write_all(wire).await?;
-        self.port.flush().await?;
-
+    async fn recv_frame(&mut self) -> Result<Frame, CoreError> {
         let frame = timeout(self.timeout, self.read_frame())
             .await
             .map_err(|_| CoreError::Frame(crate::core::error::FrameError::TooShort(0)))??;
