@@ -82,7 +82,12 @@ impl Command for MultiplePollingInstruction {
     const CODE: u8 = 0x27;
 
     fn encode(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(2);
+        // Spec §3: PL=0x0003, Reserved(1)=0x22, CNT(2). The reserved byte is
+        // mandatory — without it the device misparses CNT and ignores the
+        // requested poll count (verified on device: CNT=1 yields one inventory
+        // round only when the 0x22 byte is present).
+        let mut buf = Vec::with_capacity(3);
+        buf.push(0x22);
         buf.push_u16(self.pool_times);
         buf
     }
@@ -428,8 +433,9 @@ mod tests {
 
     #[test]
     fn multi_polling_encode() {
+        // Spec §3: reserved byte 0x22 followed by big-endian CNT.
         let cmd = MultiplePollingInstruction { pool_times: 1000 };
-        assert_eq!(cmd.encode(), vec![0x03, 0xE8]);
+        assert_eq!(cmd.encode(), vec![0x22, 0x03, 0xE8]);
     }
 
     #[test]
