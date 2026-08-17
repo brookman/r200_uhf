@@ -37,7 +37,7 @@ impl<W: Read + Write> SyncReader<W> {
     pub fn send<C: Command>(&mut self, cmd: &C) -> Result<C::Response, CoreError> {
         self.send_only(cmd)?;
         let frame = self.recv()?;
-        Ok(cmd.decode_response(&frame.data)?)
+        cmd.decode_response(&frame.data)
     }
 
     /// Send a command without waiting for a response.

@@ -39,7 +39,7 @@ impl<W: AsyncReadExt + AsyncWriteExt + Unpin + Send> AsyncReader<W> {
     pub async fn send<C: Command + Sync>(&mut self, cmd: &C) -> Result<C::Response, CoreError> {
         let wire = Frame::encode_command(C::CODE, &cmd.encode());
         let frame = self.send_recv(&wire).await?;
-        Ok(cmd.decode_response(&frame.data)?)
+        cmd.decode_response(&frame.data)
     }
 
     async fn send_recv(&mut self, wire: &[u8]) -> Result<Frame, CoreError> {

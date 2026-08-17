@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::core::error::CommandError;
+use crate::core::error::CoreError;
 use crate::util::PushU16;
 
 pub trait Command {
@@ -14,8 +14,9 @@ pub trait Command {
     ///
     /// # Errors
     ///
-    /// Returns [`CommandError`] if the response data is malformed or indicates a device error.
-    fn decode_response(&self, data: &[u8]) -> Result<Self::Response, CommandError>;
+    /// Returns [`CoreError::InvalidPayload`] if the response data is malformed
+    /// or too short for this command.
+    fn decode_response(&self, data: &[u8]) -> Result<Self::Response, CoreError>;
 }
 
 // ── Module info ─────────────────────────────────────
@@ -26,6 +27,7 @@ pub struct GetModuleInfo {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 #[repr(u8)]
 pub enum ModuleInfoParam {
     HardwareVersion = 0x00,
@@ -48,7 +50,7 @@ impl Command for GetModuleInfo {
         vec![self.param as u8]
     }
 
-    fn decode_response(&self, data: &[u8]) -> Result<ModuleInfoResponse, CommandError> {
+    fn decode_response(&self, data: &[u8]) -> Result<ModuleInfoResponse, CoreError> {
         Ok(ModuleInfoResponse {
             param: self.param,
             text: String::from_utf8_lossy(data).to_string(),
@@ -68,7 +70,7 @@ impl Command for SinglePollingInstruction {
         vec![]
     }
 
-    fn decode_response(&self, data: &[u8]) -> Result<Option<crate::core::tag::Tag>, CommandError> {
+    fn decode_response(&self, data: &[u8]) -> Result<Option<crate::core::tag::Tag>, CoreError> {
         Ok(crate::core::tag::Tag::parse(data))
     }
 }
@@ -92,7 +94,7 @@ impl Command for MultiplePollingInstruction {
         buf
     }
 
-    fn decode_response(&self, _data: &[u8]) -> Result<(), CommandError> {
+    fn decode_response(&self, _data: &[u8]) -> Result<(), CoreError> {
         Ok(())
     }
 }
@@ -107,7 +109,7 @@ impl Command for StopMultiplePolling {
         vec![]
     }
 
-    fn decode_response(&self, _data: &[u8]) -> Result<(), CommandError> {
+    fn decode_response(&self, _data: &[u8]) -> Result<(), CoreError> {
         Ok(())
     }
 }
@@ -167,7 +169,7 @@ impl Command for SetSelect {
         buf
     }
 
-    fn decode_response(&self, _data: &[u8]) -> Result<(), CommandError> {
+    fn decode_response(&self, _data: &[u8]) -> Result<(), CoreError> {
         Ok(())
     }
 }
@@ -182,7 +184,7 @@ impl Command for SetSendSelect {
         vec![if self.0 { 0x02 } else { 0x01 }]
     }
 
-    fn decode_response(&self, _data: &[u8]) -> Result<(), CommandError> {
+    fn decode_response(&self, _data: &[u8]) -> Result<(), CoreError> {
         Ok(())
     }
 }
@@ -191,6 +193,7 @@ impl Command for SetSendSelect {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 #[repr(u8)]
 pub enum MemBank {
     Reserved = 0x00,
@@ -243,14 +246,20 @@ impl Command for ReadLabel {
         buf
     }
 
-    fn decode_response(&self, data: &[u8]) -> Result<Vec<u8>, CommandError> {
+    fn decode_response(&self, data: &[u8]) -> Result<Vec<u8>, CoreError> {
         // Response layout (spec §6.4): UL(1) + PC(2) + EPC(UL-2) + Data(N),
         // where UL is the combined PC+EPC length in bytes. The read-back data
         // follows the echoed PC+EPC, so it starts at offset 1 + UL.
-        let ul = *data.first().ok_or(CommandError(0xFF))? as usize;
-        data.get(1 + ul..)
-            .map(<[u8]>::to_vec)
-            .ok_or(CommandError(0xFF))
+        let ul = *data
+            .first()
+            .ok_or_else(|| CoreError::InvalidPayload("read response missing UL byte".into()))?
+            as usize;
+        data.get(1 + ul..).map(<[u8]>::to_vec).ok_or_else(|| {
+            CoreError::InvalidPayload(format!(
+                "read response too short: UL={ul} but only {} bytes",
+                data.len()
+            ))
+        })
     }
 }
 
@@ -280,7 +289,7 @@ impl Command for WriteLabel {
         buf
     }
 
-    fn decode_response(&self, _data: &[u8]) -> Result<(), CommandError> {
+    fn decode_response(&self, _data: &[u8]) -> Result<(), CoreError> {
         Ok(())
     }
 }
@@ -299,7 +308,7 @@ impl Command for KillTag {
         self.password.to_vec()
     }
 
-    fn decode_response(&self, _data: &[u8]) -> Result<(), CommandError> {
+    fn decode_response(&self, _data: &[u8]) -> Result<(), CoreError> {
         Ok(())
     }
 }
@@ -320,7 +329,7 @@ impl Command for LockTag {
         buf
     }
 
-    fn decode_response(&self, _data: &[u8]) -> Result<(), CommandError> {
+    fn decode_response(&self, _data: &[u8]) -> Result<(), CoreError> {
         Ok(())
     }
 }
@@ -337,9 +346,10 @@ impl Command for GetWorkingArea {
         vec![]
     }
 
-    fn decode_response(&self, data: &[u8]) -> Result<crate::core::region::Region, CommandError> {
+    fn decode_response(&self, data: &[u8]) -> Result<crate::core::region::Region, CoreError> {
         let byte = data.first().copied().unwrap_or(0);
-        crate::core::region::Region::from_byte(byte).ok_or(CommandError(0xFF))
+        crate::core::region::Region::from_byte(byte)
+            .ok_or_else(|| CoreError::InvalidPayload(format!("unknown region byte 0x{byte:02X}")))
     }
 }
 
@@ -353,7 +363,7 @@ impl Command for SetWorkingArea {
         vec![self.0 as u8]
     }
 
-    fn decode_response(&self, _data: &[u8]) -> Result<(), CommandError> {
+    fn decode_response(&self, _data: &[u8]) -> Result<(), CoreError> {
         Ok(())
     }
 }
@@ -368,8 +378,10 @@ impl Command for GetWorkingChannel {
         vec![]
     }
 
-    fn decode_response(&self, data: &[u8]) -> Result<u8, CommandError> {
-        data.first().copied().ok_or(CommandError(0xFF))
+    fn decode_response(&self, data: &[u8]) -> Result<u8, CoreError> {
+        data.first()
+            .copied()
+            .ok_or_else(|| CoreError::InvalidPayload("channel response is empty".into()))
     }
 }
 
@@ -383,9 +395,12 @@ impl Command for GetTransmitPower {
         vec![]
     }
 
-    fn decode_response(&self, data: &[u8]) -> Result<f64, CommandError> {
+    fn decode_response(&self, data: &[u8]) -> Result<f64, CoreError> {
         if data.len() < 2 {
-            return Err(CommandError(0xFF));
+            return Err(CoreError::InvalidPayload(format!(
+                "power response too short: {} bytes, need 2",
+                data.len()
+            )));
         }
         let raw = (u16::from(data[0]) << 8) | u16::from(data[1]);
         Ok(f64::from(raw) * 0.01)
@@ -410,7 +425,7 @@ impl Command for SetTransmitPower {
         buf
     }
 
-    fn decode_response(&self, _data: &[u8]) -> Result<(), CommandError> {
+    fn decode_response(&self, _data: &[u8]) -> Result<(), CoreError> {
         Ok(())
     }
 }

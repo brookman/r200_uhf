@@ -6,6 +6,7 @@ pub const FRAME_END: u8 = 0xDD;
 pub const MIN_FRAME_LEN: usize = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 #[repr(u8)]
 pub enum FrameType {
     Command = 0x00,
