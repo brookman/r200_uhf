@@ -2,9 +2,18 @@
 name = "r200_uhf"
 version = "0.7.0"
 edition = "2024"
+rust-version = "1.87"
 description = "Serial protocol library for R200 UHF RFID readers"
 license = "MIT"
 repository = "https://github.com/oniram88/r200_uhf"
+readme = "README.md"
+keywords = ["rfid", "uhf", "r200", "epc", "serial"]
+categories = ["embedded", "hardware-support", "encoding"]
+exclude = [
+    "R200 user protocol V2.3.3.pdf",
+    ".github/",
+    "cog.toml",
+]
 
 [dependencies]
 log = "0.4"
