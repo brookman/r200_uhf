@@ -12,7 +12,8 @@ pub enum Region {
 }
 
 impl Region {
-    pub fn from_byte(b: u8) -> Option<Self> {
+    #[must_use]
+    pub const fn from_byte(b: u8) -> Option<Self> {
         match b {
             0x01 => Some(Self::China900Mhz),
             0x02 => Some(Self::Us),
@@ -23,14 +24,15 @@ impl Region {
         }
     }
 
+    #[must_use]
     pub fn channel_frequency(self, channel: u8) -> f64 {
         let ch = f64::from(channel);
         match self {
-            Self::China900Mhz => 920.125 + ch * 0.25,
-            Self::China800Mhz => 840.125 + ch * 0.25,
-            Self::Us => 902.75 + ch * 0.5,
-            Self::Eu => 865.1 + ch * 0.6,
-            Self::Korea => 917.1 + ch * 0.2,
+            Self::China900Mhz => ch.mul_add(0.25, 920.125),
+            Self::China800Mhz => ch.mul_add(0.25, 840.125),
+            Self::Us => ch.mul_add(0.5, 902.75),
+            Self::Eu => ch.mul_add(0.6, 865.1),
+            Self::Korea => ch.mul_add(0.2, 917.1),
         }
     }
 }

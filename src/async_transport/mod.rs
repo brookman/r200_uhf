@@ -5,7 +5,7 @@ use tokio::time::timeout;
 
 use crate::core::command::Command;
 use crate::core::error::CoreError;
-use crate::core::frame::{Frame, FRAME_HEADER};
+use crate::core::frame::{FRAME_HEADER, Frame};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -15,7 +15,7 @@ pub struct AsyncReader<W> {
     read_buf: Vec<u8>,
 }
 
-impl<W: AsyncReadExt + AsyncWriteExt + Unpin> AsyncReader<W> {
+impl<W: AsyncReadExt + AsyncWriteExt + Unpin + Send> AsyncReader<W> {
     pub fn new(port: W) -> Self {
         Self {
             port,
@@ -24,15 +24,27 @@ impl<W: AsyncReadExt + AsyncWriteExt + Unpin> AsyncReader<W> {
         }
     }
 
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+    #[must_use]
+    pub const fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
-    pub async fn send<C: Command>(&mut self, cmd: &C) -> Result<C::Response, CoreError> {
+    /// Send a command and wait for its typed response.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::Io`] on I/O failure, [`CoreError::Frame`] on
+    /// malformed responses, or [`CoreError::Command`] if the device reports an error.
+    pub async fn send<C: Command + Sync>(&mut self, cmd: &C) -> Result<C::Response, CoreError> {
         let wire = Frame::encode_command(C::CODE, &cmd.encode());
-        log::trace!("send {:02X}: {:02X?}", C::CODE, wire);
-        self.port.write_all(&wire).await?;
+        let frame = self.send_recv(&wire).await?;
+        Ok(cmd.decode_response(&frame.data)?)
+    }
+
+    async fn send_recv(&mut self, wire: &[u8]) -> Result<Frame, CoreError> {
+        log::trace!("send {wire:02X?}");
+        self.port.write_all(wire).await?;
         self.port.flush().await?;
 
         let frame = timeout(self.timeout, self.read_frame())
@@ -43,10 +55,12 @@ impl<W: AsyncReadExt + AsyncWriteExt + Unpin> AsyncReader<W> {
 
         if frame.command_code == 0xFF {
             let err_code = frame.data.first().copied().unwrap_or(0xFF);
-            return Err(CoreError::Command(crate::core::error::CommandError(err_code)));
+            return Err(CoreError::Command(crate::core::error::CommandError(
+                err_code,
+            )));
         }
 
-        Ok(cmd.decode_response(&frame.data)?)
+        Ok(frame)
     }
 
     async fn read_frame(&mut self) -> Result<Frame, CoreError> {
@@ -83,11 +97,11 @@ impl<W: AsyncReadExt + AsyncWriteExt + Unpin> AsyncReader<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Region;
     use crate::core::command::*;
     use crate::core::error::CommandError;
     use crate::core::frame::FrameType;
     use crate::util::PushU16;
-    use crate::Region;
 
     fn response_frame(command_code: u8, data: &[u8]) -> Vec<u8> {
         let mut buf = Vec::new();

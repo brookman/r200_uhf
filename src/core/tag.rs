@@ -25,6 +25,7 @@ impl Hash for Tag {
 }
 
 impl Tag {
+    #[must_use]
     pub fn parse(data: &[u8]) -> Option<Self> {
         if data.len() < 6 {
             return None;
@@ -36,18 +37,22 @@ impl Tag {
         Some(Self { rssi, pc, epc, crc })
     }
 
+    #[must_use]
     pub fn uid(&self) -> &[u8] {
         &self.epc
     }
 
+    #[must_use]
     pub fn epc_hex(&self) -> String {
         hex_bytes(&self.epc)
     }
 
+    #[must_use]
     pub fn pc_hex(&self) -> String {
         hex_bytes(&self.pc)
     }
 
+    #[must_use]
     pub fn crc_hex(&self) -> String {
         hex_bytes(&self.crc)
     }
@@ -66,8 +71,13 @@ impl fmt::Display for Tag {
     }
 }
 
+#[must_use]
 pub fn hex_bytes(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    use std::fmt::Write;
+    bytes.iter().fold(String::new(), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
 }
 
 #[cfg(test)]
@@ -78,8 +88,8 @@ mod tests {
     fn parse_valid_tag() {
         // RSSI(1) + PC(2) + EPC(12) + CRC(2) = 17 bytes
         let data = vec![
-            0xAB, 0x30, 0x00, 0xE2, 0x00, 0x10, 0x11, 0x22, 0x33, 0x44, 0x55,
-            0x66, 0x77, 0x88, 0x99, 0x00, 0x00,
+            0xAB, 0x30, 0x00, 0xE2, 0x00, 0x10, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+            0x99, 0x00, 0x00,
         ];
         let tag = Tag::parse(&data).unwrap();
         assert_eq!(tag.rssi, 0xAB);
@@ -137,9 +147,24 @@ mod tests {
     #[test]
     fn hash_and_eq_by_epc() {
         use std::collections::HashSet;
-        let t1 = Tag { rssi: 0x10, pc: [0, 0], epc: vec![0xAA, 0xBB], crc: [0, 0] };
-        let t2 = Tag { rssi: 0x20, pc: [0, 0], epc: vec![0xAA, 0xBB], crc: [0, 0] };
-        let t3 = Tag { rssi: 0x10, pc: [0, 0], epc: vec![0xCC, 0xDD], crc: [0, 0] };
+        let t1 = Tag {
+            rssi: 0x10,
+            pc: [0, 0],
+            epc: vec![0xAA, 0xBB],
+            crc: [0, 0],
+        };
+        let t2 = Tag {
+            rssi: 0x20,
+            pc: [0, 0],
+            epc: vec![0xAA, 0xBB],
+            crc: [0, 0],
+        };
+        let t3 = Tag {
+            rssi: 0x10,
+            pc: [0, 0],
+            epc: vec![0xCC, 0xDD],
+            crc: [0, 0],
+        };
 
         assert_eq!(t1, t2);
         assert_ne!(t1, t3);

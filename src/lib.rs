@@ -1,5 +1,5 @@
-mod util;
 pub mod core;
+mod util;
 
 #[cfg(feature = "sync")]
 pub mod sync;

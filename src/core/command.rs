@@ -10,6 +10,11 @@ pub trait Command {
 
     fn encode(&self) -> Vec<u8>;
 
+    /// Decode a response frame's data payload into the command-specific response type.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommandError`] if the response data is malformed or indicates a device error.
     fn decode_response(&self, data: &[u8]) -> Result<Self::Response, CommandError>;
 }
 
@@ -149,7 +154,8 @@ pub enum MemBank {
 }
 
 impl MemBank {
-    pub fn from_byte(b: u8) -> Option<Self> {
+    #[must_use]
+    pub const fn from_byte(b: u8) -> Option<Self> {
         match b {
             0x00 => Some(Self::Reserved),
             0x01 => Some(Self::Epc),
@@ -216,6 +222,10 @@ impl Command for WriteLabel {
         buf.extend_from_slice(&self.access_password);
         buf.push(self.bank as u8);
         buf.push_u16(self.address);
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "RFID tag data fits in u16 words"
+        )]
         buf.push_u16(word_count as u16);
         buf.extend_from_slice(&self.data);
         buf
@@ -340,6 +350,11 @@ impl Command for SetTransmitPower {
     const CODE: u8 = 0xB6;
 
     fn encode(&self) -> Vec<u8> {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "power 0.0..30.0 dBm * 100 fits in u16; validated by CLI"
+        )]
         let raw = (self.0 * 100.0) as u16;
         let mut buf = Vec::with_capacity(2);
         buf.push_u16(raw);
@@ -377,7 +392,9 @@ mod tests {
 
     #[test]
     fn get_module_info_decode() {
-        let cmd = GetModuleInfo { param: ModuleInfoParam::SoftwareVersion };
+        let cmd = GetModuleInfo {
+            param: ModuleInfoParam::SoftwareVersion,
+        };
         let resp = cmd.decode_response(b"V2.3.5").unwrap();
         assert_eq!(resp.text, "V2.3.5");
     }
@@ -396,10 +413,11 @@ mod tests {
     #[test]
     fn single_polling_decode_tag() {
         let data = vec![
-            0xAB, 0x30, 0x00, 0xE2, 0x00, 0x10, 0x11, 0x22, 0x33, 0x44, 0x55,
-            0x66, 0x77, 0x88, 0x99, 0x00, 0x00,
+            0xAB, 0x30, 0x00, 0xE2, 0x00, 0x10, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+            0x99, 0x00, 0x00,
         ];
-        let tag = SinglePollingInstruction.decode_response(&data)
+        let tag = SinglePollingInstruction
+            .decode_response(&data)
             .unwrap()
             .unwrap();
         assert_eq!(tag.rssi, 0xAB);
@@ -447,7 +465,14 @@ mod tests {
     #[test]
     fn read_label_decode_strips_prefix() {
         let data = vec![0x01, 0x02, 0x03, 0xAA, 0xBB, 0xCC];
-        let resp = ReadLabel { access_password: [0; 4], bank: MemBank::Epc, address: 0, length: 0 }.decode_response(&data).unwrap();
+        let resp = ReadLabel {
+            access_password: [0; 4],
+            bank: MemBank::Epc,
+            address: 0,
+            length: 0,
+        }
+        .decode_response(&data)
+        .unwrap();
         assert_eq!(resp, vec![0xAA, 0xBB, 0xCC]);
     }
 
@@ -480,10 +505,7 @@ mod tests {
             password: [0x11, 0x22, 0x33, 0x44],
             lock_data: [0x02, 0x00, 0x80],
         };
-        assert_eq!(
-            cmd.encode(),
-            vec![0x11, 0x22, 0x33, 0x44, 0x02, 0x00, 0x80]
-        );
+        assert_eq!(cmd.encode(), vec![0x11, 0x22, 0x33, 0x44, 0x02, 0x00, 0x80]);
     }
 
     #[test]

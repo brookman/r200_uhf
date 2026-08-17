@@ -14,7 +14,8 @@ pub enum FrameType {
 }
 
 impl FrameType {
-    pub fn from_byte(b: u8) -> Option<Self> {
+    #[must_use]
+    pub const fn from_byte(b: u8) -> Option<Self> {
         match b {
             0x00 => Some(Self::Command),
             0x01 => Some(Self::Response),
@@ -32,12 +33,17 @@ pub struct Frame {
 }
 
 impl Frame {
+    #[must_use]
     pub fn encode_command(command_code: u8, data: &[u8]) -> Vec<u8> {
         let len = data.len();
         let mut buf = Vec::with_capacity(MIN_FRAME_LEN + len);
         buf.push(FRAME_HEADER);
         buf.push(FrameType::Command as u8);
         buf.push(command_code);
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "protocol frame length fits in u16"
+        )]
         buf.push_u16(len as u16);
         buf.extend_from_slice(data);
         buf.push(checksum(&buf[1..buf.len()]));
@@ -45,6 +51,14 @@ impl Frame {
         buf
     }
 
+    /// Decode a frame from the front of a byte buffer.
+    ///
+    /// Returns the decoded frame and the number of bytes consumed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameError`] if the buffer is too short, has a bad header/checksum,
+    /// or declares more data than available.
     pub fn decode(buf: &[u8]) -> Result<(Self, usize), FrameError> {
         if buf.len() < MIN_FRAME_LEN {
             return Err(FrameError::TooShort(buf.len()));
@@ -53,8 +67,8 @@ impl Frame {
             return Err(FrameError::BadHeader(buf[0]));
         }
 
-        let frame_type = FrameType::from_byte(buf[1])
-            .ok_or(FrameError::UnknownFrameType(buf[1]))?;
+        let frame_type =
+            FrameType::from_byte(buf[1]).ok_or(FrameError::UnknownFrameType(buf[1]))?;
         let command_code = buf[2];
         let data_len = ((buf[3] as usize) << 8) | (buf[4] as usize);
         let total_len = MIN_FRAME_LEN + data_len;
@@ -93,8 +107,15 @@ impl Frame {
     }
 }
 
+#[must_use]
 pub fn checksum(bytes: &[u8]) -> u8 {
-    bytes.iter().fold(0u16, |acc, &b| acc + u16::from(b)) as u8
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "checksum is modulo 256 by design"
+    )]
+    {
+        bytes.iter().fold(0u16, |acc, &b| acc + u16::from(b)) as u8
+    }
 }
 
 #[cfg(test)]
@@ -134,7 +155,10 @@ mod tests {
         let wire = Frame::encode_command(0x03, &[]);
         let mut bad = wire.clone();
         bad[0] = 0xFF;
-        assert!(matches!(Frame::decode(&bad), Err(FrameError::BadHeader(0xFF))));
+        assert!(matches!(
+            Frame::decode(&bad),
+            Err(FrameError::BadHeader(0xFF))
+        ));
     }
 
     #[test]
@@ -163,7 +187,10 @@ mod tests {
     fn decode_rejects_truncated_payload() {
         let mut wire = Frame::encode_command(0x03, &[0x01, 0x02]);
         wire.truncate(wire.len() - 1);
-        assert!(matches!(Frame::decode(&wire), Err(FrameError::Truncated { .. })));
+        assert!(matches!(
+            Frame::decode(&wire),
+            Err(FrameError::Truncated { .. })
+        ));
     }
 
     #[test]

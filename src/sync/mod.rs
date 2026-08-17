@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use crate::core::command::Command;
 use crate::core::error::CoreError;
-use crate::core::frame::{Frame, FRAME_HEADER};
+use crate::core::frame::{FRAME_HEADER, Frame};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -22,11 +22,18 @@ impl<W: Read + Write> SyncReader<W> {
         }
     }
 
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+    #[must_use]
+    pub const fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
+    /// Send a command and wait for its typed response.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::Io`] on serial I/O failure, [`CoreError::Frame`] on
+    /// malformed responses, or [`CoreError::Command`] if the device reports an error.
     pub fn send<C: Command>(&mut self, cmd: &C) -> Result<C::Response, CoreError> {
         self.send_only(cmd)?;
 
@@ -35,7 +42,9 @@ impl<W: Read + Write> SyncReader<W> {
 
         if frame.command_code == 0xFF {
             let err_code = frame.data.first().copied().unwrap_or(0xFF);
-            return Err(CoreError::Command(crate::core::error::CommandError(err_code)));
+            return Err(CoreError::Command(crate::core::error::CommandError(
+                err_code,
+            )));
         }
 
         Ok(cmd.decode_response(&frame.data)?)
@@ -43,6 +52,10 @@ impl<W: Read + Write> SyncReader<W> {
 
     /// Send a command without waiting for a response.
     /// Used for multi-polling where responses arrive asynchronously.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::Io`] on serial I/O failure.
     pub fn send_only<C: Command>(&mut self, cmd: &C) -> Result<(), CoreError> {
         let wire = Frame::encode_command(C::CODE, &cmd.encode());
         log::trace!("send {:02X}: {:02X?}", C::CODE, wire);
@@ -53,13 +66,20 @@ impl<W: Read + Write> SyncReader<W> {
 
     /// Read the next response frame without sending a command first.
     /// Used during multi-polling mode where the device sends tag reports asynchronously.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::Io`] on serial I/O failure, [`CoreError::Frame`] on
+    /// malformed responses, or [`CoreError::Command`] if the device reports an error.
     pub fn recv(&mut self) -> Result<Frame, CoreError> {
         let frame = self.read_frame()?;
         log::trace!("recv {:02X}: {:02X?}", frame.command_code, frame.data);
 
         if frame.command_code == 0xFF {
             let err_code = frame.data.first().copied().unwrap_or(0xFF);
-            return Err(CoreError::Command(crate::core::error::CommandError(err_code)));
+            return Err(CoreError::Command(crate::core::error::CommandError(
+                err_code,
+            )));
         }
 
         Ok(frame)
@@ -106,11 +126,11 @@ impl<W: Read + Write> SyncReader<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Region;
     use crate::core::command::*;
     use crate::core::error::CommandError;
     use crate::core::frame::FrameType;
     use crate::util::PushU16;
-    use crate::Region;
     use std::io::{Cursor, Read, Write};
 
     struct MockStream {
@@ -179,8 +199,8 @@ mod tests {
     #[test]
     fn single_polling_with_tag() {
         let tag_data = vec![
-            0xAB, 0x30, 0x00, 0xE2, 0x00, 0x10, 0x11, 0x22, 0x33, 0x44, 0x55,
-            0x66, 0x77, 0x88, 0x99, 0x00, 0x00,
+            0xAB, 0x30, 0x00, 0xE2, 0x00, 0x10, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+            0x99, 0x00, 0x00,
         ];
         let resp = response_frame(0x22, &tag_data);
         let mut reader = SyncReader::new(MockStream::with_response(&resp));

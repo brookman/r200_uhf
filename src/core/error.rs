@@ -42,7 +42,8 @@ pub struct CommandError(pub u8);
 impl CommandError {
     pub const SUCCESS: Self = Self(0x00);
 
-    pub fn is_success(self) -> bool {
+    #[must_use]
+    pub const fn is_success(self) -> bool {
         self.0 == 0x00
     }
 }
