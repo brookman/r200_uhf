@@ -1,4 +1,5 @@
 use crate::core::error::FrameError;
+use crate::util::PushU16;
 
 pub const FRAME_HEADER: u8 = 0xAA;
 pub const FRAME_END: u8 = 0xDD;
@@ -37,8 +38,7 @@ impl Frame {
         buf.push(FRAME_HEADER);
         buf.push(FrameType::Command as u8);
         buf.push(command_code);
-        buf.push((len >> 8) as u8);
-        buf.push((len & 0xFF) as u8);
+        buf.push_u16(len as u16);
         buf.extend_from_slice(data);
         buf.push(checksum(&buf[1..buf.len()]));
         buf.push(FRAME_END);

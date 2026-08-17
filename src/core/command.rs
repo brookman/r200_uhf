@@ -1,6 +1,7 @@
 use std::fmt;
 
 use crate::core::error::CommandError;
+use crate::util::PushU16;
 
 pub trait Command {
     type Response;
@@ -76,10 +77,9 @@ impl Command for MultiplePollingInstruction {
     const CODE: u8 = 0x27;
 
     fn encode(&self) -> Vec<u8> {
-        vec![
-            (self.duration_ms >> 8) as u8,
-            (self.duration_ms & 0xFF) as u8,
-        ]
+        let mut buf = Vec::with_capacity(2);
+        buf.push_u16(self.duration_ms);
+        buf
     }
 
     fn decode_response(&self, _data: &[u8]) -> Result<(), CommandError> {
@@ -186,10 +186,8 @@ impl Command for ReadLabel {
         let mut buf = Vec::with_capacity(9);
         buf.extend_from_slice(&self.access_password);
         buf.push(self.bank as u8);
-        buf.push((self.address >> 8) as u8);
-        buf.push((self.address & 0xFF) as u8);
-        buf.push((self.length >> 8) as u8);
-        buf.push((self.length & 0xFF) as u8);
+        buf.push_u16(self.address);
+        buf.push_u16(self.length);
         buf
     }
 
@@ -217,10 +215,8 @@ impl Command for WriteLabel {
         let mut buf = Vec::with_capacity(9 + self.data.len());
         buf.extend_from_slice(&self.access_password);
         buf.push(self.bank as u8);
-        buf.push((self.address >> 8) as u8);
-        buf.push((self.address & 0xFF) as u8);
-        buf.push((word_count >> 8) as u8);
-        buf.push((word_count & 0xFF) as u8);
+        buf.push_u16(self.address);
+        buf.push_u16(word_count as u16);
         buf.extend_from_slice(&self.data);
         buf
     }
@@ -345,7 +341,9 @@ impl Command for SetTransmitPower {
 
     fn encode(&self) -> Vec<u8> {
         let raw = (self.0 * 100.0) as u16;
-        vec![(raw >> 8) as u8, (raw & 0xFF) as u8]
+        let mut buf = Vec::with_capacity(2);
+        buf.push_u16(raw);
+        buf
     }
 
     fn decode_response(&self, _data: &[u8]) -> Result<(), CommandError> {

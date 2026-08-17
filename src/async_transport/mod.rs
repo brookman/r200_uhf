@@ -86,6 +86,7 @@ mod tests {
     use crate::core::command::*;
     use crate::core::error::CommandError;
     use crate::core::frame::FrameType;
+    use crate::util::PushU16;
     use crate::Region;
 
     fn response_frame(command_code: u8, data: &[u8]) -> Vec<u8> {
@@ -93,8 +94,7 @@ mod tests {
         buf.push(FRAME_HEADER);
         buf.push(FrameType::Response as u8);
         buf.push(command_code);
-        buf.push((data.len() >> 8) as u8);
-        buf.push((data.len() & 0xFF) as u8);
+        buf.push_u16(data.len() as u16);
         buf.extend_from_slice(data);
         let cs: u8 = buf[1..].iter().fold(0u16, |a, &b| a + b as u16) as u8;
         buf.push(cs);

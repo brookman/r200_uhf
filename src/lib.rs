@@ -1,3 +1,4 @@
+mod util;
 pub mod core;
 
 #[cfg(feature = "sync")]
