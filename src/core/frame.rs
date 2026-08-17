@@ -179,7 +179,8 @@ impl FrameDecoder {
     }
 }
 
-/// Map an error response frame (command code `0xFF`) to its [`CommandError`].
+/// Map an error response frame (command code `0xFF`) to its
+/// [`CommandError`](crate::core::error::CommandError).
 ///
 /// Returns `None` for non-error frames.
 #[must_use]
