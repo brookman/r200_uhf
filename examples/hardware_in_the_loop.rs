@@ -103,7 +103,11 @@ fn pass(msg: &str) {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    use std::fmt::Write;
+    bytes.iter().fold(String::new(), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
 }
 
 /// Poll the field enough times to reliably enumerate every tag present.
@@ -229,37 +233,43 @@ fn ensure_canonical(reader: &mut Reader) {
     // target, so a fresh pair maps real -> 1111..., blank -> 2222....
     let weight = |e: &Vec<u8>| e.iter().map(|&b| u32::from(b)).sum::<u32>();
     sources.sort_by(|a, b| weight(b).cmp(&weight(a)).then(b.cmp(a)));
-    let mut next_source = sources.into_iter();
 
-    for target in &missing {
-        let source = next_source
-            .next()
-            .expect("source count checked against missing count above");
+    // `sources.len() >= missing.len()` was asserted above, so zip consumes every
+    // missing target without any fallible lookup.
+    for (target, source) in missing.iter().zip(sources) {
         println!("  → assigning {} := {}", hex(&source), hex(target));
         rewrite_epc(reader, &source, target);
     }
 }
 
-fn main() {
-    let port_name = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "/dev/cu.usbserial-10".to_string());
+/// Poll repeatedly (re-sweeping to catch weakly-coupled tags) until both
+/// canonical tags have been observed, or panic with `msg` if they never are.
+fn assert_both_present(reader: &mut Reader, msg: &str) {
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let both = try_retry("observe both tags", RETRIES, || {
+        for epc in present_epcs(reader) {
+            if !seen.contains(&epc) {
+                seen.push(epc);
+            }
+        }
+        if seen.iter().any(|e| e[..] == EPC_ONE[..]) && seen.iter().any(|e| e[..] == EPC_TWO[..]) {
+            Ok(())
+        } else {
+            Err(format!(
+                "so far saw {:?}",
+                seen.iter().map(|e| hex(e)).collect::<Vec<_>>()
+            ))
+        }
+    });
+    assert!(
+        both.is_ok(),
+        "{msg}: {:?}",
+        seen.iter().map(|e| hex(e)).collect::<Vec<_>>()
+    );
+}
 
-    let port = serialport::new(&port_name, 115200)
-        .timeout(Duration::from_millis(500))
-        .open()
-        .unwrap_or_else(|e| panic!("failed to open {port_name}: {e}"));
-    let mut reader = SyncReader::new(port);
-
-    println!("== hardware-in-the-loop test on {port_name} ==");
-
-    // --- Establish canonical tag IDs up front so the run is deterministic. ---
-    println!("[setup] driving tags to canonical 1111.../2222...");
-    ensure_canonical(&mut reader);
-    pass("tags are 1111... and 2222...");
-
-    // --- Module info (0x03) ---
-    println!("[info]");
+/// Module info (0x03): hardware, software and manufacturer strings.
+fn info_phase(reader: &mut Reader) {
     for (label, param) in [
         ("hardware", ModuleInfoParam::HardwareVersion),
         ("software", ModuleInfoParam::SoftwareVersion),
@@ -273,9 +283,10 @@ fn main() {
         assert!(!info.text.is_empty(), "{label} info was empty");
         pass(&format!("{label}: {}", info.text));
     }
+}
 
-    // --- Region + channel (0x08, 0xAA) and non-destructive set (0x07) ---
-    println!("[region/channel]");
+/// Region + channel (0x08, 0xAA) with a non-destructive set (0x07).
+fn region_phase(reader: &mut Reader) {
     let region = retry("get region", || {
         reader.send(&GetWorkingArea).map_err(|e| e.to_string())
     });
@@ -299,80 +310,57 @@ fn main() {
     pass("region set/get round-trips");
     // Region enum is byte-mapped; confirm a known value survives from_byte.
     assert_eq!(Region::from_byte(region as u8), Some(region));
+}
 
-    // --- Transmit power get/set/restore (0xB7, 0xB6) ---
-    println!("[power]");
-    let original_power = retry("get power", || {
+/// Transmit power get/set/restore (0xB7, 0xB6).
+fn power_phase(reader: &mut Reader) {
+    let original = retry("get power", || {
         reader.send(&GetTransmitPower).map_err(|e| e.to_string())
     });
-    pass(&format!("current power {original_power:.1} dBm"));
-    let target_power = if original_power > 20.0 { 20.0 } else { 26.0 };
+    pass(&format!("current power {original:.1} dBm"));
+    let target = if original > 20.0 { 20.0 } else { 26.0 };
     retry("set power", || {
         reader
-            .send(&SetTransmitPower(target_power))
+            .send(&SetTransmitPower(target))
             .map_err(|e| e.to_string())
     });
-    let read_power = retry("verify power", || {
+    let read_back = retry("verify power", || {
         reader.send(&GetTransmitPower).map_err(|e| e.to_string())
     });
     assert!(
-        (read_power - target_power).abs() < 0.6,
-        "power set to {target_power} but read {read_power}"
+        (read_back - target).abs() < 0.6,
+        "power set to {target} but read {read_back}"
     );
-    pass(&format!("power set to {read_power:.1} dBm"));
-    // Restore original power.
+    pass(&format!("power set to {read_back:.1} dBm"));
     retry("restore power", || {
         reader
-            .send(&SetTransmitPower(original_power))
+            .send(&SetTransmitPower(original))
             .map_err(|e| e.to_string())
     });
-    pass(&format!("power restored to {original_power:.1} dBm"));
+    pass(&format!("power restored to {original:.1} dBm"));
+}
 
-    // --- Single polling (0x22) ---
-    println!("[single poll]");
-    // A weakly-coupled tag can be missed by a single sweep, so re-sweep a few
-    // times until both canonical tags have been observed.
-    let mut polled: Vec<Vec<u8>> = Vec::new();
-    let saw_both = try_retry("poll both tags", RETRIES, || {
-        for epc in present_epcs(&mut reader) {
-            if !polled.contains(&epc) {
-                polled.push(epc);
-            }
-        }
-        let both = polled.iter().any(|e| e[..] == EPC_ONE[..])
-            && polled.iter().any(|e| e[..] == EPC_TWO[..]);
-        if both {
-            Ok(())
-        } else {
-            Err(format!(
-                "so far saw {:?}",
-                polled.iter().map(|e| hex(e)).collect::<Vec<_>>()
-            ))
-        }
-    });
-    saw_both.unwrap_or_else(|_| {
-        panic!(
-            "single-poll did not see both canonical tags: {:?}",
-            polled.iter().map(|e| hex(e)).collect::<Vec<_>>()
-        )
-    });
+/// Single polling (0x22): confirm both canonical tags are seen.
+fn single_poll_phase(reader: &mut Reader) {
+    assert_both_present(reader, "single-poll did not see both canonical tags");
     pass("single-poll sees both 1111... and 2222...");
+}
 
-    // --- Multi polling + stop (0x27, 0x28) ---
-    println!("[multi poll]");
+/// Multi polling + stop (0x27, 0x28): collect tag reports for a short window.
+fn multi_poll_phase(reader: &mut Reader) {
     retry("start multi-poll", || {
         reader
             .send_only(&MultiplePollingInstruction { pool_times: 100 })
             .map_err(|e| e.to_string())
     });
-    let mut multi_seen: Vec<Vec<u8>> = Vec::new();
+    let mut seen: Vec<Vec<u8>> = Vec::new();
     let deadline = std::time::Instant::now() + Duration::from_millis(800);
     while std::time::Instant::now() < deadline {
         match reader.recv() {
             Ok(frame) if frame.command_code == 0x22 => {
                 if let Ok(Some(tag)) = SinglePollingInstruction.decode_response(&frame.data) {
-                    if !multi_seen.contains(&tag.epc) {
-                        multi_seen.push(tag.epc);
+                    if !seen.contains(&tag.epc) {
+                        seen.push(tag.epc);
                     }
                 }
             }
@@ -386,17 +374,15 @@ fn main() {
             .map_err(|e| e.to_string())
     });
     let _ = reader.recv(); // drain the stop ack
-    assert!(!multi_seen.is_empty(), "multi-poll returned no tag reports");
-    pass(&format!(
-        "multi-poll saw {} distinct tag(s)",
-        multi_seen.len()
-    ));
+    assert!(!seen.is_empty(), "multi-poll returned no tag reports");
+    pass(&format!("multi-poll saw {} distinct tag(s)", seen.len()));
+}
 
-    // --- Select filtering (0x0C, 0x12) proven via read isolation ---
-    println!("[select]");
+/// Select filtering (0x0C, 0x12) proven via read isolation.
+fn select_phase(reader: &mut Reader) {
     // Selecting a present tag lets a read succeed...
     let sel_read = retry("read selected tag", || {
-        with_selected(&mut reader, &EPC_ONE, |reader| {
+        with_selected(reader, &EPC_ONE, |reader| {
             reader.send(&ReadLabel {
                 access_password: [0; 4],
                 bank: MemBank::Epc,
@@ -412,9 +398,10 @@ fn main() {
         "selected read returned the wrong tag"
     );
     pass("select 1111... isolates it for reading");
+
     // ...selecting an absent tag makes the read fail.
     let bogus = [0xAB; 12];
-    let bogus_read = with_selected(&mut reader, &bogus, |reader| {
+    let bogus_read = with_selected(reader, &bogus, |reader| {
         reader.send(&ReadLabel {
             access_password: [0; 4],
             bank: MemBank::Epc,
@@ -427,8 +414,121 @@ fn main() {
         "read of a non-existent selected tag unexpectedly succeeded"
     );
     pass("select of absent EPC correctly yields no tag");
+}
 
-    // --- Read TID bank (0x39) on a selected tag ---
+/// Reversible lock/unlock of the User bank on the known lock-capable tag.
+///
+/// Skips (rather than fails) when that tag is not in the field or cannot be
+/// singulated. If the lock succeeds, the unlock is retried hard so a tag is
+/// never left locked.
+fn lock_phase(reader: &mut Reader) {
+    let lockable_present = present_epcs(reader)
+        .iter()
+        .any(|e| e[..] == EPC_LOCKABLE[..]);
+    if lockable_present {
+        // Locking needs a cleanly singulated tag; with several tags crowding the
+        // antenna the reader may not isolate it. Give it a generous budget and,
+        // if it still can't, skip rather than fail the whole run.
+        let locked = try_retry("lock User bank", 15, || {
+            with_selected(reader, &EPC_LOCKABLE, |reader| {
+                reader.send(&LockTag {
+                    password: [0; 4],
+                    lock_data: LOCK_USER,
+                })
+            })
+            .map_err(|e| e.to_string())
+        });
+
+        match locked {
+            Ok(()) => {
+                pass(&format!("locked User bank of {}", hex(&EPC_LOCKABLE)));
+
+                // Bank must still be readable while locked (locked != unreadable).
+                let while_locked = try_retry("read while locked", RETRIES, || {
+                    with_selected(reader, &EPC_LOCKABLE, |reader| {
+                        reader.send(&ReadLabel {
+                            access_password: [0; 4],
+                            bank: MemBank::User,
+                            address: 0,
+                            length: 1,
+                        })
+                    })
+                    .map_err(|e| e.to_string())
+                });
+                if while_locked.is_ok() {
+                    pass("User bank still readable while locked");
+                }
+
+                // Always restore to Open — this must succeed, so retry hard.
+                // The unlock is RF-flaky under contention but does take effect;
+                // keep trying with a large budget so a tag is never left locked.
+                let unlocked = try_retry("unlock User bank", 30, || {
+                    with_selected(reader, &EPC_LOCKABLE, |reader| {
+                        reader.send(&LockTag {
+                            password: [0; 4],
+                            lock_data: UNLOCK_USER,
+                        })
+                    })
+                    .map_err(|e| e.to_string())
+                });
+                assert!(
+                    unlocked.is_ok(),
+                    "failed to unlock tag after 30 attempts — tag may be left locked!"
+                );
+                pass("unlocked User bank (restored to Open)");
+            }
+            Err(e) => {
+                println!(
+                    "  ⚠ SKIP lock: could not singulate {} ({e})",
+                    hex(&EPC_LOCKABLE)
+                );
+            }
+        }
+    } else {
+        println!(
+            "  ⚠ SKIP lock: lock-capable tag {} not in field",
+            hex(&EPC_LOCKABLE)
+        );
+    }
+}
+
+fn main() {
+    let port_name = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "/dev/cu.usbserial-10".to_string());
+
+    let port = serialport::new(&port_name, 115_200)
+        .timeout(Duration::from_millis(500))
+        .open()
+        .unwrap_or_else(|e| panic!("failed to open {port_name}: {e}"));
+    let mut reader = SyncReader::new(port);
+
+    println!("== hardware-in-the-loop test on {port_name} ==");
+
+    // --- Establish canonical tag IDs up front so the run is deterministic. ---
+    println!("[setup] driving tags to canonical 1111.../2222...");
+    ensure_canonical(&mut reader);
+    pass("tags are 1111... and 2222...");
+
+    // --- Module info (0x03) ---
+    println!("[info]");
+    info_phase(&mut reader);
+
+    println!("[region/channel]");
+    region_phase(&mut reader);
+
+    println!("[power]");
+    power_phase(&mut reader);
+
+    println!("[single poll]");
+    single_poll_phase(&mut reader);
+
+    println!("[multi poll]");
+    multi_poll_phase(&mut reader);
+
+    println!("[select]");
+    select_phase(&mut reader);
+
     println!("[read TID]");
     let tid = with_selected(&mut reader, &EPC_ONE, |reader| {
         retry("read TID", || {
@@ -456,109 +556,13 @@ fn main() {
     pass("wrote aaaa... -> 1111...");
 
     // --- Lock (0x82): reversible User-bank lock then unlock ---
-    //
-    // Run against the known lock-capable tag (EPC_LOCKABLE) when it is in the
-    // field. We lock the User bank with a reversible `Locked` action, confirm
-    // the User bank is still readable, then restore it to `Open`. No permalock
-    // bits are ever set, so the tag is always left unlocked.
-    //
-    // If that tag is absent, the step is skipped rather than failing — most
-    // tags on this bench have no lockable User bank.
     println!("[lock]");
-    let lockable_present = present_epcs(&mut reader)
-        .iter()
-        .any(|e| e[..] == EPC_LOCKABLE[..]);
-    if !lockable_present {
-        println!(
-            "  ⚠ SKIP lock: lock-capable tag {} not in field",
-            hex(&EPC_LOCKABLE)
-        );
-    } else {
-        // Locking needs a cleanly singulated tag; with several tags crowding the
-        // antenna the reader may not isolate it. Give it a generous budget and,
-        // if it still can't, skip rather than fail the whole run.
-        let locked = try_retry("lock User bank", 15, || {
-            with_selected(&mut reader, &EPC_LOCKABLE, |reader| {
-                reader.send(&LockTag {
-                    password: [0; 4],
-                    lock_data: LOCK_USER,
-                })
-            })
-            .map_err(|e| e.to_string())
-        });
-
-        match locked {
-            Ok(()) => {
-                pass(&format!("locked User bank of {}", hex(&EPC_LOCKABLE)));
-
-                // Bank must still be readable while locked (locked != unreadable).
-                let while_locked = try_retry("read while locked", RETRIES, || {
-                    with_selected(&mut reader, &EPC_LOCKABLE, |reader| {
-                        reader.send(&ReadLabel {
-                            access_password: [0; 4],
-                            bank: MemBank::User,
-                            address: 0,
-                            length: 1,
-                        })
-                    })
-                    .map_err(|e| e.to_string())
-                });
-                if while_locked.is_ok() {
-                    pass("User bank still readable while locked");
-                }
-
-                // Always restore to Open — this must succeed, so retry hard.
-                // The unlock is RF-flaky under contention but does take effect;
-                // keep trying with a large budget so a tag is never left locked.
-                try_retry("unlock User bank", 30, || {
-                    with_selected(&mut reader, &EPC_LOCKABLE, |reader| {
-                        reader.send(&LockTag {
-                            password: [0; 4],
-                            lock_data: UNLOCK_USER,
-                        })
-                    })
-                    .map_err(|e| e.to_string())
-                })
-                .expect("failed to unlock tag after 30 attempts — tag may be left locked!");
-                pass("unlocked User bank (restored to Open)");
-            }
-            Err(e) => {
-                println!(
-                    "  ⚠ SKIP lock: could not singulate {} ({e})",
-                    hex(&EPC_LOCKABLE)
-                );
-            }
-        }
-    }
+    lock_phase(&mut reader);
 
     // --- Teardown: guarantee canonical IDs regardless of the above. ---
     println!("[teardown] restoring canonical 1111.../2222...");
     ensure_canonical(&mut reader);
-    // Re-sweep a few times; a weakly-coupled tag may be missed by one sweep.
-    let mut final_epcs: Vec<Vec<u8>> = Vec::new();
-    let restored = try_retry("confirm canonical", RETRIES, || {
-        for epc in present_epcs(&mut reader) {
-            if !final_epcs.contains(&epc) {
-                final_epcs.push(epc);
-            }
-        }
-        let both = final_epcs.iter().any(|e| e[..] == EPC_ONE[..])
-            && final_epcs.iter().any(|e| e[..] == EPC_TWO[..]);
-        if both {
-            Ok(())
-        } else {
-            Err(format!(
-                "so far saw {:?}",
-                final_epcs.iter().map(|e| hex(e)).collect::<Vec<_>>()
-            ))
-        }
-    });
-    restored.unwrap_or_else(|_| {
-        panic!(
-            "teardown failed to restore canonical IDs: {:?}",
-            final_epcs.iter().map(|e| hex(e)).collect::<Vec<_>>()
-        )
-    });
+    assert_both_present(&mut reader, "teardown failed to restore canonical IDs");
     pass("tags restored to 1111... and 2222...");
 
     println!("\n== ALL CHECKS PASSED ==");
