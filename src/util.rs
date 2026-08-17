@@ -20,6 +20,7 @@ pub fn hex_lower(bytes: &[u8]) -> String {
 }
 
 /// Encode bytes as an uppercase hex string (no separators).
+#[cfg(feature = "cli")]
 #[must_use]
 pub fn hex_upper(bytes: &[u8]) -> String {
     use std::fmt::Write;
@@ -41,9 +42,14 @@ mod tests {
     }
 
     #[test]
-    fn hex_lower_and_upper() {
+    fn hex_lower_encodes() {
         assert_eq!(hex_lower(&[0xAB, 0x0F]), "ab0f");
-        assert_eq!(hex_upper(&[0xAB, 0x0F]), "AB0F");
         assert_eq!(hex_lower(&[]), "");
+    }
+
+    #[cfg(feature = "cli")]
+    #[test]
+    fn hex_upper_encodes() {
+        assert_eq!(hex_upper(&[0xAB, 0x0F]), "AB0F");
     }
 }
