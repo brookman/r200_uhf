@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use r200_uhf::sync::SyncReader;
 use r200_uhf::{GetModuleInfo, ModuleInfoParam, SinglePollingInstruction};
 
@@ -11,7 +13,8 @@ fn main() {
     let baud: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(115200);
 
     let port = serialport::new(port_name, baud)
-        .open_native()
+        .timeout(Duration::from_millis(500))
+        .open()
         .expect("open port");
 
     let mut reader = SyncReader::new(port);
@@ -30,7 +33,7 @@ fn main() {
                 println!("Found: {tag}");
                 break;
             }
-            None => std::thread::sleep(std::time::Duration::from_millis(100)),
+            None => std::thread::sleep(Duration::from_millis(100)),
         }
     }
 }

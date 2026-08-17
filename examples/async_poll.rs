@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use r200_uhf::async_transport::AsyncReader;
 use r200_uhf::{GetModuleInfo, ModuleInfoParam, SinglePollingInstruction};
 use tokio_serial::SerialPortBuilderExt;
@@ -33,7 +35,7 @@ async fn main() {
                 println!("Found: {tag}");
                 break;
             }
-            None => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+            None => tokio::time::sleep(Duration::from_millis(100)).await,
         }
     }
 }
