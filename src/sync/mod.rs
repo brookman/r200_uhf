@@ -28,6 +28,14 @@ impl<W: Read + Write> SyncReader<W> {
         self
     }
 
+    /// Consume the reader and return the underlying I/O handle.
+    ///
+    /// Used by embedded hosts to shut the port down cleanly when a session ends.
+    #[must_use]
+    pub fn into_inner(self) -> W {
+        self.port
+    }
+
     /// Send a command and wait for its typed response.
     ///
     /// Unsolicited notification frames (e.g. tag reports left over from a
